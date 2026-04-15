@@ -1,14 +1,19 @@
+use crate::files::FileError;
 use crate::result::*;
 use crate::{PgPool, model::*, timeout};
+use diesel::r2d2::ConnectionManager;
 use diesel::{PgConnection, QueryResult};
 use dog3::builtin;
 use dog3::parser::format_string::FormatString;
 use dog3::parser::grammar::{ActualParameter, CommandStatement, Execution, OpenStatement, Value};
 use dog3::parser::parse;
-use dog3::runtime::Runtime;
-use dog3::runtime::functions::RegisterError;
+use dog3::runtime::functions::{FunctionLibrary, RegisterError};
+use dog3::runtime::output::Output;
+use dog3::runtime::{ExecutionError, Runtime};
 use log::*;
+use r2d2::{Error, PooledConnection};
 use std::time::Duration;
+use dog3::runtime::scope::ScopeStack;
 use teloxide::payloads::SendMessage;
 use teloxide::prelude::*;
 use teloxide::requests::JsonRequest;
@@ -57,7 +62,109 @@ fn pre(input: impl AsRef<str>) -> Formatted {
     Formatted::Html(format!("<pre>{}</pre>", input.as_ref()))
 }
 
-fn register_libraries(mut runtime: Runtime) -> Runtime {
+fn register_libraries(pool: PgPool, chat_id: i64, user_id: i64, mut runtime: Runtime) -> Runtime {
+    let (pool1, pool2, pool3) = (pool.clone(), pool.clone(), pool);
+    let read = move |_: &FunctionLibrary, _: &mut ScopeStack, args: &[Output]| -> Result<Output, ExecutionError> {
+        let path = match args {
+            [path] => path,
+            _ => return Err(ExecutionError::InternalError),
+        };
+        let mut cn = match pool1.get() {
+            Ok(cn) => cn,
+            Err(err) => {
+                error!("Error running `read` builtin: {err}");
+                return Err(ExecutionError::InternalError);
+            }
+        };
+        match crate::files::read(&mut cn, chat_id, user_id, path.value()) {
+            Ok(file) => {
+                let string = String::from_utf8_lossy(&file).into_owned();
+                Ok(Output::new_truthy_with(string.into()))
+            }
+            Err(FileError::QueryError(err)) => {
+                error!("Error running `read` builtin: {err}");
+                Err(ExecutionError::InternalError)
+            }
+            Err(err) => Ok(Output::new_falsy_with(err.to_string().into())),
+        }
+    };
+    let write = move |_: &FunctionLibrary, _: &mut ScopeStack, args: &[Output]| -> Result<Output, ExecutionError> {
+        let (path, content) = match args {
+            [path, content] => (path, content),
+            _ => return Err(ExecutionError::InternalError),
+        };
+        let mut cn = match pool2.get() {
+            Ok(cn) => cn,
+            Err(err) => {
+                error!("Error running `write` builtin: {err}");
+                return Err(ExecutionError::InternalError);
+            }
+        };
+        match crate::files::write(
+            &mut cn,
+            chat_id,
+            user_id,
+            path.value(),
+            content.value().as_bytes(),
+        ) {
+            Ok(_) => Ok(Output::new_truthy()),
+            Err(FileError::QueryError(err)) => {
+                error!("Error running `write` builtin: {err}");
+                Err(ExecutionError::InternalError)
+            }
+            Err(err) => Ok(Output::new_falsy_with(err.to_string().into())),
+        }
+    };
+    let history = move |_: &FunctionLibrary, _: &mut ScopeStack, args: &[Output]| -> Result<Output, ExecutionError> {
+        let (count, offset, with_content, with_users) = match args {
+            [count, offset, with_content, with_users] => (
+                count.try_into(),
+                offset.try_into(),
+                with_content,
+                with_users,
+            ),
+            _ => return Err(ExecutionError::InternalError),
+        };
+        let (count, offset) = match (count, offset) {
+            (Ok(count), Ok(offset)) => (count, offset),
+            _ => return Ok(Output::new_falsy()),
+        };
+        let with_content = with_content.is_truthy();
+        let with_users = with_users.is_truthy();
+        let mut cn = match pool3.get() {
+            Ok(cn) => cn,
+            Err(err) => {
+                error!("Error running `write` builtin: {err}");
+                return Err(ExecutionError::InternalError);
+            }
+        };
+        match message::Message::list(&mut cn, chat_id, count, offset) {
+            Ok(messages) => {
+                let mut output = String::new();
+                for (message, user) in messages {
+                    if with_users {
+                        output += &user.first_name;
+                        if let Some(last_name) = user.last_name {
+                            output += " ";
+                            output += &last_name;
+                        }
+                    }
+                    if with_users && with_content {
+                        output += ": ";
+                    }
+                    if with_content {
+                        output += &message.content.replace("\n", " ");
+                    }
+                    output += "\n";
+                }
+                Ok(Output::new_truthy_with(output.into()))
+            },
+            Err(err) => {
+                error!("Error running `history` builtin: {err}");
+                Err(ExecutionError::InternalError)
+            }
+        }
+    };
     let _ = runtime.library.merge(builtin::std::build());
     let _ = runtime.library.merge(builtin::str::build());
     let _ = runtime.library.merge(builtin::net::build());
@@ -65,6 +172,16 @@ fn register_libraries(mut runtime: Runtime) -> Runtime {
     let _ = runtime.library.merge(builtin::math::build());
     let _ = runtime.library.merge(builtin::logic::build());
     let _ = runtime.library.merge(builtin::json::build());
+    builtin!(runtime.library, read, "path");
+    builtin!(runtime.library, write, "path", "content");
+    builtin!(
+        runtime.library,
+        history,
+        "count",
+        "offset",
+        "with_content",
+        "with_users"
+    );
     runtime
 }
 
@@ -115,10 +232,10 @@ pub async fn handle_message(
     let text: Formatted = match parse(&String::from_utf8_lossy(&file)) {
         Ok(mut program) => {
             let mut runtime = Runtime::new();
-            runtime = register_libraries(runtime);
+            runtime = register_libraries(pool.clone(), chat_id, user_id, runtime);
             match runtime.library.add_scripts(program.functions) {
                 Ok(_) => {
-                    let executions = vec![Execution::OpenStatement(OpenStatement::CommandStmt(
+                    program.executions.push(Execution::OpenStatement(OpenStatement::CommandStmt(
                         CommandStatement {
                             name: "main".to_string(),
                             parameters: vec![
@@ -128,12 +245,18 @@ pub async fn handle_message(
                                 ActualParameter {
                                     value: Value::String(FormatString::raw(&user.full_name())),
                                 },
+                                ActualParameter {
+                                    value: Value::String(FormatString::raw(reply_to_text.unwrap_or_default())),
+                                },
+                                ActualParameter {
+                                    value: Value::String(FormatString::raw(reply_to_from.as_deref().unwrap_or_default())),
+                                },
                             ],
                         },
-                    ))];
+                    )));
 
                     let outcome = match timeout::timeout(
-                        move || runtime.execute(&executions),
+                        move || runtime.execute(&program.executions),
                         Duration::from_secs(90),
                     ) {
                         Ok(res) => match res {

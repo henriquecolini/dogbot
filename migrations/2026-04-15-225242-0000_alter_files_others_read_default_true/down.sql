@@ -1,0 +1,2 @@
+ALTER TABLE files
+    ALTER COLUMN others_read SET DEFAULT FALSE;

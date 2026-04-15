@@ -39,9 +39,17 @@ impl File {
     pub fn find_by_id(cn: &mut PgConnection, id: Uuid) -> QueryResult<Option<File>> {
         File::query().filter(files::id.eq(id)).first(cn).optional()
     }
-    pub fn list_children(cn: &mut PgConnection, parent_id: Option<Uuid>) -> QueryResult<Vec<File>> {
+    pub fn list_children(
+        cn: &mut PgConnection,
+        chat_id: i64,
+        parent_id: Option<Uuid>,
+    ) -> QueryResult<Vec<File>> {
         File::query()
-            .filter(files::parent_id.is_not_distinct_from(parent_id))
+            .filter(
+                files::chat_id
+                    .eq(chat_id)
+                    .and(files::parent_id.is_not_distinct_from(parent_id)),
+            )
             .load(cn)
     }
     pub fn create_dir(
@@ -72,9 +80,14 @@ impl File {
         content: &[u8],
     ) -> QueryResult<File> {
         if Self::find_by_name(cn, chat_id, parent_id, name)?.is_some() {
-            update(files::files.filter(files::name.eq(name)))
-                .set(files::content.eq(content))
-                .get_result(cn)
+            update(
+                files::files
+                    .filter(files::chat_id.eq(chat_id))
+                    .filter(files::parent_id.is_not_distinct_from(parent_id))
+                    .filter(files::name.eq(name)),
+            )
+            .set(files::content.eq(content))
+            .get_result(cn)
         } else {
             insert_into(files::files)
                 .values((

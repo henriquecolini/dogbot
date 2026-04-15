@@ -437,7 +437,7 @@ dependencies = [
 [[package]]
 name = "dog3"
 version = "0.1.0"
-source = "git+https://github.com/henriquecolini/dog3.git#b17aab9bdb6b98716797d5a2793d3db7db180483"
+source = "git+https://github.com/henriquecolini/dog3.git#f3ab62416df05b59b6a25ef7dae6b0edf6844ab7"
 dependencies = [
  "clap",
  "itertools 0.11.0",

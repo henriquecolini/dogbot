@@ -1,18 +1,27 @@
+use crate::model::user::User;
+use crate::schema::messages::dsl as messages;
 use diesel::*;
 use time::OffsetDateTime;
 
-use crate::schema::messages::dsl as messages;
-
+#[derive(Queryable, Selectable, Identifiable, Associations, Debug, PartialEq)]
+#[diesel(belongs_to(User))]
+#[diesel(table_name = crate::schema::messages)]
 pub struct Message {
-    id: i64,
-    chat_id: i64,
-    user_id: i64,
-    content: String,
-    created_at: OffsetDateTime,
+    pub id: i64,
+    pub chat_id: i64,
+    pub user_id: i64,
+    pub content: String,
+    pub created_at: OffsetDateTime,
 }
 
 impl Message {
-    pub fn insert(cn: &mut PgConnection, id: i64, chat_id: i64, user_id: i64, content: &str) -> QueryResult<()> {
+    pub fn insert(
+        cn: &mut PgConnection,
+        id: i64,
+        chat_id: i64,
+        user_id: i64,
+        content: &str,
+    ) -> QueryResult<()> {
         insert_into(messages::messages)
             .values((
                 messages::id.eq(id),
@@ -22,5 +31,24 @@ impl Message {
             ))
             .execute(cn)?;
         Ok(())
+    }
+    pub fn list(
+        cn: &mut PgConnection,
+        chat_id: i64,
+        count: i64,
+        offset: i64,
+    ) -> QueryResult<Vec<(Message, User)>> {
+        crate::schema::messages::table
+            .inner_join(crate::schema::users::table)
+            .filter(messages::chat_id.eq(chat_id))
+            .select((Message::as_select(), User::as_select()))
+            .order_by(messages::created_at.desc())
+            .limit(count)
+            .offset(offset)
+            .load::<(Message, User)>(cn)
+            .and_then(|mut m| {
+                m.reverse();
+                Ok(m)
+            })
     }
 }

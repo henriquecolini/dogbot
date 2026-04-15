@@ -3,7 +3,7 @@ use time::OffsetDateTime;
 
 use crate::schema::users::dsl as users;
 
-#[derive(HasQuery, Debug)]
+#[derive(HasQuery, Identifiable, Debug, PartialEq)]
 #[diesel(table_name = crate::schema::users)]
 pub struct User {
     pub id: i64,

@@ -202,7 +202,7 @@ pub fn list(
     let dir = resolve_path(cn, chat_id, user_id, path)?;
 
     let Some(dir) = dir else {
-        return Ok(File::list_children(cn, None)?);
+        return Ok(File::list_children(cn, chat_id, None)?);
     };
 
     if !dir.is_dir() {
@@ -213,5 +213,5 @@ pub fn list(
         return Err(FileError::NotEnoughPermissions);
     }
 
-    Ok(File::list_children(cn, Some(dir.id))?)
+    Ok(File::list_children(cn, chat_id, Some(dir.id))?)
 }
