@@ -236,7 +236,7 @@ version = "3.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "faf9468729b8cbcea668e36183cb69d317348c2e08e994829fb56ebfdfbaac34"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -448,7 +448,7 @@ dependencies = [
 [[package]]
 name = "dog3"
 version = "0.1.0"
-source = "git+https://github.com/henriquecolini/dog3.git#f3ab62416df05b59b6a25ef7dae6b0edf6844ab7"
+source = "git+https://github.com/henriquecolini/dog3.git#6dbdf26c1ec0023528281586b063d127512e08ef"
 dependencies = [
  "clap",
  "itertools 0.11.0",
@@ -574,7 +574,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -1742,7 +1742,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -2167,7 +2167,7 @@ dependencies = [
  "getrandom 0.4.2",
  "once_cell",
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

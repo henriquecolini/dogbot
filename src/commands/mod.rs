@@ -26,6 +26,10 @@ pub enum Command {
     Write(String),
     #[command(description = "Lê um arquivo")]
     Read(String),
+    #[command(description = "Deleta um arquivo")]
+    Rm(String),
+    #[command(description = "Deleta um arquivo ou pasta recursivamente (com -r)")]
+    Rmr(String),
     #[command(description = "Altera as permissões de um arquivo")]
     Chmod(String),
     #[command(description = "Altera o dono de um arquivo")]
@@ -65,6 +69,12 @@ pub async fn handle_command(
         }
         Command::Read(path) => {
             read_command(bot, pool, msg, path).await?;
+        }
+        Command::Rm(path) => {
+            rm_command(bot, pool, msg, path, false).await?;
+        }
+        Command::Rmr(path) => {
+            rm_command(bot, pool, msg, path, true).await?;
         }
         Command::Chmod(_) => {}
         Command::Chown(_) => {}
@@ -265,6 +275,25 @@ async fn write_command(
         }
         Err(err) => {
             bot.send_message(msg.chat.id, format!("Erro ao criar arquivo: {}", err))
+                .await?;
+        }
+    }
+    Ok(())
+}
+
+async fn rm_command(bot: Bot, pool: PgPool, msg: Message, path: String, recursive: bool) -> BotResult<()> {
+    let mut cn = pool.get()?;
+    let Some(user_id) = msg.from.map(|u| u.id.0 as i64) else {
+        return Ok(());
+    };
+    let chat_id = get_connected_chat(&mut cn, user_id, msg.chat.id.0)?;
+    match crate::files::remove(&mut cn, chat_id, user_id, &path, recursive) {
+        Ok(_) => {
+            bot.send_message(msg.chat.id, "Arquivo deletado com sucesso")
+                .await?;
+        }
+        Err(err) => {
+            bot.send_message(msg.chat.id, format!("Erro ao deletar arquivo: {}", err))
                 .await?;
         }
     }

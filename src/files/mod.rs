@@ -169,6 +169,32 @@ pub fn write(
     )?)
 }
 
+pub fn remove(
+    cn: &mut PgConnection,
+    chat_id: i64,
+    user_id: i64,
+    path: &str,
+    recursive: bool,
+) -> Result<(), FileError> {
+    let file = resolve_path(cn, chat_id, user_id, path)?;
+
+    let Some(file) = file else {
+        return Err(FileError::FileNotFound);
+    };
+
+    if file.is_dir() && !recursive {
+        return Err(FileError::NotAFile);
+    }
+
+    if !file.can_write(Some(user_id)) {
+        return Err(FileError::NotEnoughPermissions);
+    }
+    
+    File::delete(cn, file.id)?;
+
+    Ok(())
+}
+
 pub fn read(
     cn: &mut PgConnection,
     chat_id: i64,

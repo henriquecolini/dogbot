@@ -100,6 +100,9 @@ impl File {
                 .get_result(cn)
         }
     }
+    pub fn delete(cn: &mut PgConnection, id: Uuid) -> QueryResult<usize> {
+        delete(files::files.filter(files::id.eq(id))).execute(cn)
+    }
     pub fn is_dir(&self) -> bool {
         self.content.is_none()
     }
