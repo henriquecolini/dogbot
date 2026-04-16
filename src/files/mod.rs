@@ -1,5 +1,4 @@
 use crate::model::file::File;
-use crate::model::*;
 use diesel::PgConnection;
 use thiserror::Error;
 
