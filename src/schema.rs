@@ -28,7 +28,7 @@ diesel::table! {
     messages (id, chat_id) {
         id -> Int8,
         chat_id -> Int8,
-        user_id -> Int8,
+        user_id -> Nullable<Int8>,
         content -> Text,
         created_at -> Timestamptz,
     }
