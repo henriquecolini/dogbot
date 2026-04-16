@@ -14,8 +14,15 @@ use diesel::*;
 use log::*;
 use teloxide::prelude::*;
 use teloxide::types::*;
+use diesel_migrations::{embed_migrations, EmbeddedMigrations, MigrationHarness};
 
 type PgPool = Pool<ConnectionManager<PgConnection>>;
+
+const MIGRATIONS: EmbeddedMigrations = embed_migrations!();
+
+fn run_migrations(cn: &mut impl MigrationHarness<pg::Pg>) {
+    cn.run_pending_migrations(MIGRATIONS).expect("Could not run migrations");
+}
 
 fn get_connection_pool() -> PgPool {
     let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
@@ -30,6 +37,9 @@ async fn main() {
     dotenvy::dotenv().ok();
 
     let pool = get_connection_pool();
+    let mut cn = pool.get().expect("Failed to get connection from pool to run migrations");
+
+    run_migrations(&mut cn);
 
     info!("Starting bot");
 

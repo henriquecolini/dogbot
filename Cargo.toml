@@ -16,3 +16,4 @@ thiserror = "2.0.18"
 r2d2 = "0.8.10"
 uuid = "1.23.0"
 dog3 = { git = "https://github.com/henriquecolini/dog3.git" }
+diesel_migrations = "2.3.1"
