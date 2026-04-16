@@ -21,11 +21,13 @@ type PgPool = Pool<ConnectionManager<PgConnection>>;
 const MIGRATIONS: EmbeddedMigrations = embed_migrations!();
 
 fn run_migrations(cn: &mut impl MigrationHarness<pg::Pg>) {
+    info!("Running migrations");
     cn.run_pending_migrations(MIGRATIONS).expect("Could not run migrations");
 }
 
 fn get_connection_pool() -> PgPool {
     let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
+    info!("Connecting to database at {}", database_url);
     Pool::builder()
         .build(ConnectionManager::new(database_url))
         .expect("Failed to create connection pool")
@@ -60,7 +62,7 @@ async fn on_command(bot: Bot, pool: PgPool, msg: Message, command: Command) -> R
         "Received command {:?} from {} on {}",
         command,
         msg.from.as_ref().map(|u| u.id.0.to_string()).as_deref().unwrap_or("unknown"),
-        msg.chat.title().as_deref().unwrap_or("unknown")
+        msg.chat.id
     );
     match commands::handle_command(bot, pool, msg, command).await {
         Ok(_) => Ok(()),

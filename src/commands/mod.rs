@@ -30,6 +30,8 @@ pub enum Command {
     Chmod(String),
     #[command(description = "Altera o dono de um arquivo")]
     Chown(String),
+    #[command(description = "Mostra o ID da pessoa que enviou a mensagem e do chat")]
+    Id,
 }
 
 pub async fn handle_command(
@@ -66,6 +68,9 @@ pub async fn handle_command(
         }
         Command::Chmod(_) => {}
         Command::Chown(_) => {}
+        Command::Id => {
+            id_command(bot, msg).await?;
+        }
     }
     Ok(())
 }
@@ -285,5 +290,18 @@ async fn mkdir_command(bot: Bot, pool: PgPool, msg: Message, path: String) -> Bo
                 .await?;
         }
     }
+    Ok(())
+}
+
+async fn id_command(bot: Bot, msg: Message) -> BotResult<()> {
+    bot.send_message(
+        msg.chat.id,
+        format!(
+            "Seu ID: `{}`, ID do Chat: `{}`",
+            msg.from.map(|u| u.id.0).unwrap_or_default(),
+            msg.chat.id
+        ),
+    )
+    .await?;
     Ok(())
 }
