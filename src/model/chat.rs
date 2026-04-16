@@ -6,6 +6,7 @@ use time::OffsetDateTime;
 
 #[derive(HasQuery)]
 #[diesel(table_name = crate::schema::chats)]
+#[allow(unused)]
 pub struct Chat {
     pub id: i64,
     pub name: Option<String>,
@@ -59,14 +60,6 @@ impl Chat {
                 .get_result(cn)
                 .optional(),
         }
-    }
-
-    pub fn try_get(cn: &mut PgConnection, chat_id: i64) -> QueryResult<Option<Chat>> {
-        Self::get(cn, chat_id).optional()
-    }
-
-    pub fn get(cn: &mut PgConnection, chat_id: i64) -> QueryResult<Chat> {
-        Self::query().filter(chats::id.eq(chat_id)).first(cn)
     }
 }
 

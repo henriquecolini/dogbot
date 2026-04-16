@@ -1,13 +1,10 @@
 use crate::chat_address::ChatAddress;
-use crate::files::FileError;
-use crate::model::chat::Chat;
-use crate::model::file::File;
 use crate::result::BotResult;
 use crate::{PgPool, model::*};
 use diesel::{PgConnection, QueryResult};
 use log::*;
 use teloxide::prelude::*;
-use teloxide::types::{ChatKind, PublicChatKind};
+use teloxide::types::ChatKind;
 use teloxide::utils::command::BotCommands;
 
 #[derive(BotCommands, Clone, Debug, PartialEq)]

@@ -1,17 +1,15 @@
 use crate::files::FileError;
 use crate::result::*;
 use crate::{PgPool, model::*, timeout};
-use diesel::r2d2::ConnectionManager;
 use diesel::{PgConnection, QueryResult};
 use dog3::builtin;
 use dog3::parser::format_string::FormatString;
 use dog3::parser::grammar::{ActualParameter, CommandStatement, Execution, OpenStatement, Value};
 use dog3::parser::parse;
-use dog3::runtime::functions::{FunctionLibrary, RegisterError};
+use dog3::runtime::functions::FunctionLibrary;
 use dog3::runtime::output::Output;
 use dog3::runtime::{ExecutionError, Runtime};
 use log::*;
-use r2d2::{Error, PooledConnection};
 use std::time::Duration;
 use dog3::runtime::scope::ScopeStack;
 use teloxide::payloads::SendMessage;

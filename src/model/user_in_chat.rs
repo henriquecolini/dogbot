@@ -4,6 +4,7 @@ use time::OffsetDateTime;
 
 use crate::schema::users_in_chats::dsl as uic;
 
+#[allow(unused)]
 pub struct UserInChat {
     user_id: i64,
     chat_id: i64,
