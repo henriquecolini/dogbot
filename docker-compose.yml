@@ -27,6 +27,8 @@ services:
       RUST_LOG: info
     ports:
       - "3000:3000"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
 
   watchtower:
     image: nickfedor/watchtower
