@@ -524,7 +524,7 @@ dependencies = [
 [[package]]
 name = "dog3"
 version = "0.1.0"
-source = "git+https://github.com/henriquecolini/dog3.git#05ba0b164ae2961e9c86ad37aa3bf035e0885c27"
+source = "git+https://github.com/henriquecolini/dog3.git#d4add8533735e4108b8d4e064baf625281c33d28"
 dependencies = [
  "async-recursion",
  "clap",
