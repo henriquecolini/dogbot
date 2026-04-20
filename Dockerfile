@@ -13,7 +13,7 @@ COPY . .
 RUN cargo build --release
 RUN mv ./target/release/dogbot ./app
 
-FROM debian:bookworm-slim AS runtime
+FROM debian:trixie-slim AS runtime
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends libpq5 ca-certificates \
