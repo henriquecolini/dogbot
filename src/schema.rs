@@ -17,10 +17,18 @@ diesel::table! {
         owner_id -> Nullable<Int8>,
         parent_id -> Nullable<Uuid>,
         name -> Text,
-        others_read -> Bool,
-        others_write -> Bool,
+        group_read -> Bool,
+        group_write -> Bool,
         content -> Nullable<Bytea>,
         created_at -> Timestamptz,
+        group_execute -> Bool,
+        user_read -> Bool,
+        user_write -> Bool,
+        user_execute -> Bool,
+        others_read -> Bool,
+        others_write -> Bool,
+        others_execute -> Bool,
+        last_modified_at -> Timestamptz,
     }
 }
 

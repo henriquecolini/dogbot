@@ -6,14 +6,16 @@ edition = "2024"
 [dependencies]
 env_logger = "0.11.10"
 teloxide = { version = "0.17.0", features = ["macros"] }
-tokio = { version = "1.52.0", features = ["full"] }
+tokio = { version = "1.52.1", features = ["full"] }
 anyhow = "1.0.102"
 log = "0.4.29"
 dotenvy = "0.15.7"
 diesel = { version = "2.2.0", features = ["postgres", "r2d2", "time", "uuid"] }
-time = "0.3.47"
+time = { version = "0.3.47", features = ["formatting"] }
 thiserror = "2.0.18"
 r2d2 = "0.8.10"
 uuid = "1.23.0"
 dog3 = { git = "https://github.com/henriquecolini/dog3.git" }
 diesel_migrations = "2.3.1"
+clap = "4.6.1"
+shlex = { git = "https://github.com/henriquecolini/rust-shlex.git" }

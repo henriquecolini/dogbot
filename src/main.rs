@@ -1,20 +1,47 @@
+pub mod chat_address;
 mod commands;
+pub mod files;
+mod formatted;
+mod messages;
 mod model;
+pub mod prelude;
 mod result;
 pub mod schema;
-mod messages;
-pub mod chat_address;
-pub mod files;
-pub mod timeout;
 
+use crate::commands::*;
+use crate::formatted::SendFormatted;
 use crate::result::*;
 use commands::Command;
 use diesel::r2d2::{ConnectionManager, Pool};
 use diesel::*;
+use diesel_migrations::{embed_migrations, EmbeddedMigrations, MigrationHarness};
 use log::*;
+use teloxide::dptree::case;
 use teloxide::prelude::*;
 use teloxide::types::*;
-use diesel_migrations::{embed_migrations, EmbeddedMigrations, MigrationHarness};
+use teloxide::utils::command::{BotCommands, ParseError};
+
+#[derive(Clone, Debug)]
+pub struct Context {
+    chat_id: ChatId,
+    user_id: UserId,
+    connected_chat_id: ChatId,
+    message_id: MessageId,
+    chat_name: String,
+    chat_is_private: bool,
+    user_first_name: String,
+    user_last_name: Option<String>,
+    user_username: Option<String>,
+    message_content: String,
+    reply_to_content: Option<String>,
+    reply_to_from: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+enum MaybeCommand {
+    NotACommand,
+    Command(Command),
+}
 
 type PgPool = Pool<ConnectionManager<PgConnection>>;
 
@@ -22,7 +49,8 @@ const MIGRATIONS: EmbeddedMigrations = embed_migrations!();
 
 fn run_migrations(cn: &mut impl MigrationHarness<pg::Pg>) {
     info!("Running migrations");
-    cn.run_pending_migrations(MIGRATIONS).expect("Could not run migrations");
+    cn.run_pending_migrations(MIGRATIONS)
+        .expect("Could not run migrations");
 }
 
 fn get_connection_pool() -> PgPool {
@@ -39,45 +67,65 @@ async fn main() {
     dotenvy::dotenv().ok();
 
     let pool = get_connection_pool();
-    let mut cn = pool.get().expect("Failed to get connection from pool to run migrations");
+    let mut cn = pool
+        .get()
+        .expect("Failed to get connection from pool to run migrations");
 
     run_migrations(&mut cn);
 
     info!("Starting bot");
 
     let bot = Bot::from_env();
-    let handler = dptree::entry()
-        .map(move |_: Update| pool.clone())
+    let handler = Update::filter_message()
+        .inspect(|m: Message| info!("Received message: {}", m.id))
+        .map(move || pool.clone())
         .branch(
-            Update::filter_message()
-                .filter_command::<Command>()
-                .endpoint(on_command),
+            dptree::entry()
+                .filter_map_async(extract_context)
+                .filter_map_async(extract_maybe_command)
+                .branch(
+                    dptree::entry()
+                        .filter_map(filter_map_command)
+                        .inspect(|cmd: Command| info!("Received command: {cmd:?}"))
+                        .branch(case![Command::Help].endpoint(help::handle))
+                        .branch(case![Command::Hostname(c)].endpoint(hostname::handle))
+                        .branch(case![Command::Connect(c)].endpoint(connect::handle))
+                        .branch(case![Command::Disconnect].endpoint(disconnect::handle))
+                        .branch(case![Command::Ls(c)].endpoint(ls::handle))
+                        .branch(case![Command::Mkdir(c)].endpoint(mkdir::handle))
+                        .branch(case![Command::Write(c)].endpoint(write::handle))
+                        .branch(case![Command::Read(c)].endpoint(read::handle))
+                        .branch(case![Command::Rm(c)].endpoint(rm::handle))
+                        .branch(case![Command::Chmod(c)].endpoint(chmod::handle))
+                        .branch(case![Command::Chown(c)].endpoint(chown::handle))
+                        .branch(case![Command::Id].endpoint(id::handle)),
+                )
+                .branch(
+                    dptree::entry()
+                        .filter_map(filter_map_not_command)
+                        .inspect(|msg: Message| info!("Received message: {}", msg.id))
+                        .endpoint(messages::handle),
+                ),
         )
-        .branch(Update::filter_message().endpoint(on_message));
+        .endpoint(default_endpoint);
     Dispatcher::builder(bot, handler).build().dispatch().await;
 }
 
-async fn on_command(bot: Bot, pool: PgPool, msg: Message, command: Command) -> ResponseResult<()> {
-    info!(
-        "Received command {:?} from {} on {}",
-        command,
-        msg.from.as_ref().map(|u| u.id.0.to_string()).as_deref().unwrap_or("unknown"),
-        msg.chat.id
-    );
-    match commands::handle_command(bot, pool, msg, command).await {
-        Ok(_) => Ok(()),
-        Err(BotError::TelegramError(err)) => Err(err.into()),
+async fn extract_context(pool: PgPool, msg: Message) -> Option<Context> {
+    let mut cn = match pool.get() {
+        Ok(cn) => cn,
         Err(err) => {
-            error!("Error handling command: {:?}", err);
-            Ok(())
+            error!("Failed to get connection from pool: {err}");
+            return None;
         }
-    }
-}
-
-async fn on_message(bot: Bot, pool: PgPool, msg: Message) -> ResponseResult<()> {
+    };
     let (
         MessageKind::Common(MessageCommon {
-            media_kind: MediaKind::Text(MediaText { text, .. }),
+            media_kind:
+                MediaKind::Text(MediaText {
+                    text: message_content,
+                    ..
+                }),
             reply_to_message,
             ..
         }),
@@ -85,16 +133,79 @@ async fn on_message(bot: Bot, pool: PgPool, msg: Message) -> ResponseResult<()> 
         chat,
     ) = (msg.kind, msg.from, msg.chat)
     else {
-        return Ok(());
+        warn!("Received message without text: {:?}", msg.id);
+        return None;
     };
-    info!("Received message from {} on {}", user.id, chat.id);
-    match messages::handle_message(bot, pool, chat, user, msg.id, text, reply_to_message.map(|r| *r)).await {
-        Ok(()) => Ok(()),
-        Err(BotError::TelegramError(err)) => Err(err.into()),
-        Err(e) => {
-            error!("Error handling message: {:?}", e);
-            Ok(())
+    let (chat_is_private, chat_name) = match chat.kind {
+        ChatKind::Public(chat) => (false, chat.title.unwrap_or_default()),
+        ChatKind::Private(_) => (true, user.full_name()),
+    };
+    let connected_chat_id = if let Ok(db_user) = model::User::get(&mut cn, user.id) {
+        db_user
+            .current_connection
+            .map(|id| ChatId(id))
+            .unwrap_or(chat.id)
+    } else {
+        chat.id
+    };
+    let (reply_to_content, reply_to_from) = match reply_to_message {
+        None => (None, None),
+        Some(msg) => (
+            msg.text().map(|t| t.to_owned()),
+            msg.from.map(|u| u.full_name()),
+        ),
+    };
+    Some(Context {
+        chat_id: chat.id,
+        user_id: user.id,
+        connected_chat_id,
+        message_id: msg.id,
+        chat_name,
+        chat_is_private,
+        user_first_name: user.first_name,
+        user_last_name: user.last_name,
+        user_username: user.username,
+        message_content,
+        reply_to_content,
+        reply_to_from,
+    })
+}
+
+async fn extract_maybe_command(bot: Bot, msg: Message, me: Me) -> Option<MaybeCommand> {
+    let bot_name = me.user.username.expect("Bots must have a username");
+    let Some(text) = msg.text().or_else(|| msg.caption()) else {
+        return None;
+    };
+    match Command::parse(text, &bot_name) {
+        Ok(command) => Some(MaybeCommand::Command(command)),
+        Err(err) => {
+            if let ParseError::UnknownCommand(uc) = &err {
+                if !uc.starts_with('/') {
+                    return Some(MaybeCommand::NotACommand);
+                }
+            }
+            if let Err(err) = bot.send_code(msg.chat.id, err.to_string()).await {
+                error!("Failed to send error message: {}", err);
+            }
+            None
         }
     }
 }
 
+fn filter_map_command(maybe_command: MaybeCommand) -> Option<Command> {
+    match maybe_command {
+        MaybeCommand::Command(command) => Some(command),
+        _ => None,
+    }
+}
+
+fn filter_map_not_command(maybe_command: MaybeCommand) -> Option<()> {
+    match maybe_command {
+        MaybeCommand::NotACommand => Some(()),
+        _ => None,
+    }
+}
+
+async fn default_endpoint() -> BotResult<()> {
+    Ok(())
+}

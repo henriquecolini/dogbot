@@ -1,7 +1,7 @@
 use crate::chat_address::ChatAddress;
 use crate::schema::chats::dsl as chats;
-use diesel::dsl::{exists, select};
 use diesel::*;
+use teloxide::prelude::*;
 use time::OffsetDateTime;
 
 #[derive(HasQuery)]
@@ -18,36 +18,36 @@ pub struct Chat {
 impl Chat {
     pub fn upsert(
         cn: &mut PgConnection,
-        id: i64,
+        id: ChatId,
         name: Option<&str>,
         is_group: bool,
     ) -> QueryResult<()> {
         insert_into(chats::chats)
             .values((
-                chats::id.eq(id),
+                chats::id.eq(id.0),
                 chats::name.eq(&name),
                 chats::is_group.eq(is_group),
             ))
             .on_conflict(chats::id)
             .do_update()
             .set((
-                chats::id.eq(id),
+                chats::id.eq(id.0),
                 chats::name.eq(&name),
                 chats::is_group.eq(is_group),
             ))
             .execute(cn)?;
         Ok(())
     }
-    pub fn set_alias(cn: &mut PgConnection, id: i64, alias: Option<&str>) -> QueryResult<()> {
-        update(chats::chats.filter(chats::id.eq(id)))
+    pub fn set_alias(cn: &mut PgConnection, id: ChatId, alias: Option<&str>) -> QueryResult<()> {
+        update(chats::chats.filter(chats::id.eq(id.0)))
             .set(chats::alias.eq(&alias))
             .execute(cn)?;
         Ok(())
     }
-    pub fn check_if_exists(cn: &mut PgConnection, id: i64) -> QueryResult<bool> {
-        let exists =
-            select(exists(chats::chats.filter(chats::id.eq(id)))).get_result::<bool>(cn)?;
-        Ok(exists)
+    pub fn get(cn: &mut PgConnection, id: ChatId) -> QueryResult<Chat> {
+        Chat::query()
+            .filter(chats::id.eq(id.0))
+            .get_result(cn)
     }
     pub fn find(cn: &mut PgConnection, address: ChatAddress<'_>) -> QueryResult<Option<Chat>> {
         match address {
@@ -60,6 +60,9 @@ impl Chat {
                 .get_result(cn)
                 .optional(),
         }
+    }
+    pub fn id(&self) -> ChatId {
+        ChatId(self.id)
     }
 }
 
