@@ -34,37 +34,15 @@ pub async fn handle(
         connected_chat_id,
         chat_id,
         user_id,
-        message_id,
         message_content,
-        chat_is_private,
-        chat_name,
-        user_first_name,
-        user_last_name,
-        user_username,
+        user_full_name,
         reply_to_content,
         reply_to_from,
         ..
     }: Context,
 ) -> BotResult<()> {
     let mut cn = pool.get()?;
-    model::Chat::upsert(&mut cn, chat_id, Some(&chat_name), !chat_is_private)?;
-    model::User::upsert(
-        &mut cn,
-        user_id,
-        &user_first_name,
-        user_last_name.as_deref(),
-        user_username.as_deref(),
-    )?;
-    model::UserInChat::upsert(&mut cn, user_id, chat_id)?;
-    model::Message::insert(
-        &mut cn,
-        message_id,
-        chat_id,
-        Some(user_id),
-        &message_content,
-    )?;
-    info!("Message received, {message_content} from {user_first_name}");
-    let file = match crate::files::read(&mut cn, connected_chat_id, user_id, "main.dog") {
+    let file = match files::read_for_execution(&mut cn, connected_chat_id, user_id, "main.dog") {
         Ok(file) => file,
         Err(_) => return Ok(()),
     };
@@ -79,11 +57,7 @@ pub async fn handle(
                         "main",
                         &[
                             &message_content,
-                            &if let Some(user_last_name) = user_last_name {
-                                format!("{} {}", user_first_name, user_last_name)
-                            } else {
-                                user_first_name.to_string()
-                            },
+                            &user_full_name,
                             reply_to_content.as_deref().unwrap_or_default(),
                             reply_to_from.as_deref().unwrap_or_default(),
                         ],
@@ -93,7 +67,8 @@ pub async fn handle(
 
                     let bot = bot.clone();
                     let typer = tokio::task::spawn(async move {
-                        let mut inter = interval(Duration::from_secs(1));
+                        let mut inter = interval(Duration::from_secs(4));
+                        tokio::time::sleep(Duration::from_secs(1)).await;
                         loop {
                             inter.tick().await;
                             bot.send_chat_action(chat_id, ChatAction::Typing).await.ok();

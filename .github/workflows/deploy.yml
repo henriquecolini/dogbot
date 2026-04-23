@@ -26,6 +26,8 @@ jobs:
           context: .
           push: true
           platforms: linux/amd64
+          build-args: |
+            APP_VERSION=${{ github.event.release.tag_name }}
           tags: |
             ghcr.io/${{ github.repository_owner }}/dogbot:${{ github.event.release.tag_name }}-amd64
           cache-from: type=registry,ref=ghcr.io/${{ github.repository_owner }}/dogbot:cache-amd64
@@ -53,6 +55,8 @@ jobs:
           context: .
           push: true
           platforms: linux/arm64
+          build-args: |
+            APP_VERSION=${{ github.event.release.tag_name }}
           tags: |
             ghcr.io/${{ github.repository_owner }}/dogbot:${{ github.event.release.tag_name }}-arm64
           cache-from: type=registry,ref=ghcr.io/${{ github.repository_owner }}/dogbot:cache-arm64

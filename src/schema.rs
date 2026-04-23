@@ -7,6 +7,7 @@ diesel::table! {
         alias -> Nullable<Text>,
         created_at -> Timestamptz,
         is_group -> Bool,
+        root_id -> Uuid,
     }
 }
 
@@ -15,7 +16,7 @@ diesel::table! {
         id -> Uuid,
         chat_id -> Int8,
         owner_id -> Nullable<Int8>,
-        parent_id -> Nullable<Uuid>,
+        parent_id -> Uuid,
         name -> Text,
         group_read -> Bool,
         group_write -> Bool,
@@ -29,6 +30,7 @@ diesel::table! {
         others_write -> Bool,
         others_execute -> Bool,
         last_modified_at -> Timestamptz,
+        is_dir -> Bool,
     }
 }
 
@@ -62,7 +64,6 @@ diesel::table! {
     }
 }
 
-diesel::joinable!(files -> chats (chat_id));
 diesel::joinable!(files -> users (owner_id));
 diesel::joinable!(messages -> chats (chat_id));
 diesel::joinable!(messages -> users (user_id));

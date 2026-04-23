@@ -4,6 +4,8 @@ use teloxide::prelude::*;
 
 #[derive(Parser, Clone, Debug, PartialEq)]
 pub struct MkdirCommand {
+    #[clap(short,long)]
+    parents: bool,
     path: String,
 }
 
@@ -16,10 +18,10 @@ pub async fn handle(
         connected_chat_id,
         ..
     }: Context,
-    MkdirCommand { path }: MkdirCommand,
+    MkdirCommand { parents, path }: MkdirCommand,
 ) -> BotResult<()> {
     let mut cn = pool.get()?;
-    match files::mkdir(&mut cn, connected_chat_id, user_id, &path) {
+    match files::mkdir(&mut cn, connected_chat_id, user_id, &path, parents) {
         Ok(_) => {}
         Err(err) => {
             bot.send_code(chat_id, format!("mkdir: {}", err))

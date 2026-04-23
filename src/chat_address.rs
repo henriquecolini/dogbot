@@ -1,13 +1,15 @@
+use crate::prelude::ChatId;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ChatAddress<'a> {
-    Id(i64),
+    Id(ChatId),
     Alias(&'a str),
 }
 
 impl ChatAddress<'_> {
     pub fn parse(address: &str) -> ChatAddress<'_> {
         if let Ok(id) = address.parse::<i64>() {
-            ChatAddress::Id(id)
+            ChatAddress::Id(ChatId(id))
         } else {
             ChatAddress::Alias(address)
         }

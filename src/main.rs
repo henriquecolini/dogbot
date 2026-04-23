@@ -14,7 +14,7 @@ use crate::result::*;
 use commands::Command;
 use diesel::r2d2::{ConnectionManager, Pool};
 use diesel::*;
-use diesel_migrations::{embed_migrations, EmbeddedMigrations, MigrationHarness};
+use diesel_migrations::{EmbeddedMigrations, MigrationHarness, embed_migrations};
 use log::*;
 use teloxide::dptree::case;
 use teloxide::prelude::*;
@@ -31,6 +31,7 @@ pub struct Context {
     chat_is_private: bool,
     user_first_name: String,
     user_last_name: Option<String>,
+    user_full_name: String,
     user_username: Option<String>,
     message_content: String,
     reply_to_content: Option<String>,
@@ -77,11 +78,13 @@ async fn main() {
 
     let bot = Bot::from_env();
     let handler = Update::filter_message()
-        .inspect(|m: Message| info!("Received message: {}", m.id))
         .map(move || pool.clone())
         .branch(
             dptree::entry()
                 .filter_map_async(extract_context)
+                .inspect(|pool, ctx| {
+                    register_message(pool, ctx).ok();
+                })
                 .filter_map_async(extract_maybe_command)
                 .branch(
                     dptree::entry()
@@ -109,6 +112,41 @@ async fn main() {
         )
         .endpoint(default_endpoint);
     Dispatcher::builder(bot, handler).build().dispatch().await;
+}
+
+fn register_message(
+    pool: PgPool,
+    Context {
+        chat_id,
+        user_id,
+        message_id,
+        message_content,
+        chat_is_private,
+        chat_name,
+        user_first_name,
+        user_last_name,
+        user_username,
+        ..
+    }: Context,
+) -> BotResult<()> {
+    let mut cn = pool.get()?;
+    model::Chat::upsert(&mut cn, chat_id, Some(&chat_name), !chat_is_private)?;
+    model::User::upsert(
+        &mut cn,
+        user_id,
+        &user_first_name,
+        user_last_name.as_deref(),
+        user_username.as_deref(),
+    )?;
+    model::UserInChat::upsert(&mut cn, user_id, chat_id)?;
+    model::Message::insert(
+        &mut cn,
+        message_id,
+        chat_id,
+        Some(user_id),
+        &message_content,
+    )?;
+    Ok(())
 }
 
 async fn extract_context(pool: PgPool, msg: Message) -> Option<Context> {
@@ -162,6 +200,7 @@ async fn extract_context(pool: PgPool, msg: Message) -> Option<Context> {
         message_id: msg.id,
         chat_name,
         chat_is_private,
+        user_full_name: user.full_name(),
         user_first_name: user.first_name,
         user_last_name: user.last_name,
         user_username: user.username,

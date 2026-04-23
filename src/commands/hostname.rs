@@ -20,6 +20,12 @@ pub async fn handle(
     HostnameCommand { alias }: HostnameCommand,
 ) -> BotResult<()> {
     let mut cn = pool.get()?;
+    if let Some(alias) = alias.as_deref() {
+        if alias.is_empty() || alias.contains(['/', ':', '\n']) {
+            bot.send_code(chat_id, "hostname: invalid hostname").await?;
+            return Ok(());
+        }
+    }
     match model::Chat::set_alias(&mut cn, connected_chat_id, alias.as_deref()) {
         Ok(_) => {}
         Err(DatabaseError(DatabaseErrorKind::UniqueViolation, ..)) => {

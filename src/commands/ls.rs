@@ -8,6 +8,8 @@ use time::macros::format_description;
 pub struct LsCommand {
     #[clap(short, long)]
     long: bool,
+    #[clap(short, long)]
+    all: bool,
     path: Option<String>,
 }
 
@@ -20,7 +22,7 @@ pub async fn handle(
         connected_chat_id,
         ..
     }: Context,
-    LsCommand { long, path }: LsCommand,
+    LsCommand { long, all, path }: LsCommand,
 ) -> BotResult<()> {
     let mut cn = pool.get()?;
     match files::list(
@@ -28,12 +30,12 @@ pub async fn handle(
         connected_chat_id,
         user_id,
         path.as_deref().unwrap_or_default(),
+        all,
     ) {
         Ok(mut files) => {
             if files.is_empty() {
                 return Ok(());
             }
-            files.sort_by(|a, b| b.is_dir().cmp(&a.is_dir()).then(a.name.cmp(&b.name)));
             if long {
                 let mut user_names = HashMap::new();
                 let mut longest_length = 0;
@@ -71,7 +73,7 @@ pub async fn handle(
                                 if f.others_execute { 'x' } else { '-' },
                                 f.owner_id
                                     .map(|id| user_names[&id].to_owned())
-                                    .unwrap_or_default(),
+                                    .unwrap_or_else(|| "root".to_owned()),
                                 f.last_modified_at.format(&date_format).unwrap_or_default(),
                                 if f.is_dir() {
                                     format!("<strong>{}</strong>", f.name)

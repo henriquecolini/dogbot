@@ -31,9 +31,11 @@ services:
       - "host.docker.internal:host-gateway"
 
   watchtower:
-    image: nickfedor/watchtower
+    image: nickfedor/watchtower:latest
     restart: unless-stopped
     container_name: dogbot-watchtower
+    security_opt:
+      - label=disable
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - /root/.docker/config.json:/config.json
@@ -41,6 +43,7 @@ services:
       WATCHTOWER_POLL_INTERVAL: 30
       WATCHTOWER_CLEANUP: "true"
       WATCHTOWER_INCLUDE_STOPPED: "false"
+    profiles: ["prod"]
     command: dogbot-app
 
 volumes:

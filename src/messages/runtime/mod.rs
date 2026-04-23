@@ -26,7 +26,7 @@ async fn read(
     args: Vec<Output>,
 ) -> Result<Output, ExecutionError> {
     let path = match args.as_slice() {
-        [path] => path,
+        [path] => path.value(),
         _ => return Err(ExecutionError::InternalError),
     };
     let mut cn = match pool.get() {
@@ -36,7 +36,7 @@ async fn read(
             return Err(ExecutionError::InternalError);
         }
     };
-    match crate::files::read(&mut cn, chat_id, user_id, path.value()) {
+    match crate::files::read(&mut cn, chat_id, user_id, path) {
         Ok(file) => {
             let string = String::from_utf8_lossy(&file).into_owned();
             Ok(Output::new_truthy_with(string.into()))
@@ -60,7 +60,7 @@ async fn write(
     args: Vec<Output>,
 ) -> Result<Output, ExecutionError> {
     let (path, content) = match args.as_slice() {
-        [path, content] => (path, content),
+        [path, content] => (path.value(), content.value().as_bytes()),
         _ => return Err(ExecutionError::InternalError),
     };
     let mut cn = match pool.get() {
@@ -70,13 +70,7 @@ async fn write(
             return Err(ExecutionError::InternalError);
         }
     };
-    match crate::files::write(
-        &mut cn,
-        chat_id,
-        user_id,
-        path.value(),
-        content.value().as_bytes(),
-    ) {
+    match crate::files::write(&mut cn, chat_id, user_id, path, content) {
         Ok(_) => Ok(Output::new_truthy()),
         Err(files::FileError::QueryError(err)) => {
             error!("Error running `write` builtin: {err}");
@@ -86,12 +80,67 @@ async fn write(
     }
 }
 
-async fn history(
+async fn ls(
     State {
         pool,
         chat_id,
+        user_id,
         ..
     }: State,
+    _: &FunctionLibrary,
+    _: &mut ScopeStack<'_>,
+    args: Vec<Output>,
+) -> Result<Output, ExecutionError> {
+    let (path, include_files, include_dirs) = match args.as_slice() {
+        [path] => (path.value(), true, true),
+        [path, include_files] => (path.value(), include_files.is_truthy(), true),
+        [path, include_files, include_dirs] => (
+            path.value(),
+            include_files.is_truthy(),
+            include_dirs.is_truthy(),
+        ),
+        _ => return Err(ExecutionError::InternalError),
+    };
+    let mut cn = match pool.get() {
+        Ok(cn) => cn,
+        Err(err) => {
+            error!("Error running `ls` builtin: {err}");
+            return Err(ExecutionError::InternalError);
+        }
+    };
+    match files::list(&mut cn, chat_id, user_id, path, false) {
+        Ok(list) => Ok(Output::new_truthy_with(
+            list.into_iter()
+                .filter(|f| (include_files && f.is_file()) || (include_dirs && f.is_dir()))
+                .map(|f| f.name)
+                .collect::<Vec<String>>()
+                .join("\n")
+                .into(),
+        )),
+        Err(files::FileError::QueryError(err)) => {
+            error!("Error running `ls` builtin: {err}");
+            Err(ExecutionError::InternalError)
+        }
+        Err(err) => Ok(Output::new_falsy_with(err.to_string().into())),
+    }
+}
+
+async fn version(
+    _: &FunctionLibrary,
+    _: &mut ScopeStack<'_>,
+    args: Vec<Output>,
+) -> Result<Output, ExecutionError> {
+    match args.as_slice() {
+        [] => {}
+        _ => return Err(ExecutionError::InternalError),
+    };
+    Ok(Output::new_truthy_with(
+        option_env!("APP_VERSION").unwrap_or("dev").into(),
+    ))
+}
+
+async fn history(
+    State { pool, chat_id, .. }: State,
     _: &FunctionLibrary,
     _: &mut ScopeStack<'_>,
     args: Vec<Output>,
@@ -136,31 +185,32 @@ async fn history(
     };
     match model::Message::list(&mut cn, chat_id, count, offset) {
         Ok(messages) => {
-            let mut output = String::new();
+            let mut output = vec![];
             for (message, user) in messages {
                 if !with_bot && user.is_none() {
                     continue;
                 }
+                let mut line = String::new();
                 if with_users {
                     if let Some(user) = user {
-                        output += &user.first_name;
+                        line += &user.first_name;
                         if let Some(last_name) = user.last_name {
-                            output += " ";
-                            output += &last_name;
+                            line += " ";
+                            line += &last_name;
                         }
                     } else {
-                        output += "<bot>"
+                        line += "<bot>"
                     }
                 }
                 if with_users && with_content {
-                    output += ": ";
+                    line += ": ";
                 }
                 if with_content {
-                    output += &message.content.replace("\n", " ");
+                    line += &message.content.replace("\n", " ");
                 }
-                output += "\n";
+                output.push(line);
             }
-            Ok(Output::new_truthy_with(output.into()))
+            Ok(Output::new_truthy_with(output.join("\n").into()))
         }
         Err(err) => {
             error!("Error running `history` builtin: {err}");
@@ -189,22 +239,23 @@ pub fn register_libraries(
     let _ = runtime.library.merge(builtin::json::build());
     builtin_state!(runtime.library, read, state.clone(), "path");
     builtin_state!(runtime.library, write, state.clone(), "path", "content");
-    builtin_state!(runtime.library, history, state.clone());
-    builtin_state!(runtime.library, history, state.clone(), "history");
-    builtin_state!(runtime.library, history, state.clone(), "history", "count");
+    builtin_state!(runtime.library, ls, state.clone(), "path");
+    builtin_state!(runtime.library, ls, state.clone(), "path", "include_files");
     builtin_state!(
         runtime.library,
-        history,
+        ls,
         state.clone(),
-        "history",
-        "count",
-        "offset"
+        "path",
+        "include_files",
+        "include_dirs"
     );
+    builtin_state!(runtime.library, history, state.clone());
+    builtin_state!(runtime.library, history, state.clone(), "count");
+    builtin_state!(runtime.library, history, state.clone(), "count", "offset");
     builtin_state!(
         runtime.library,
         history,
         state.clone(),
-        "history",
         "count",
         "offset",
         "with_content"
@@ -213,7 +264,6 @@ pub fn register_libraries(
         runtime.library,
         history,
         state.clone(),
-        "history",
         "count",
         "offset",
         "with_content",
@@ -223,12 +273,12 @@ pub fn register_libraries(
         runtime.library,
         history,
         state.clone(),
-        "history",
         "count",
         "offset",
         "with_content",
         "with_users",
         "with_bot"
     );
+    builtin!(runtime.library, version);
     runtime
 }
