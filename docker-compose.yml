@@ -40,11 +40,9 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
       - /root/.docker/config.json:/config.json
     environment:
-      WATCHTOWER_POLL_INTERVAL: 30
+      WATCHTOWER_POLL_INTERVAL: 60
       WATCHTOWER_CLEANUP: "true"
       WATCHTOWER_INCLUDE_STOPPED: "false"
-    profiles: ["prod"]
-    command: dogbot-app
 
 volumes:
   dogbot_data:
