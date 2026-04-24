@@ -5,9 +5,21 @@ use dog3::parser::grammar::Execution;
 use dog3::parser::parse;
 use dog3::runtime::Runtime;
 use log::*;
+use serde::Deserialize;
 use std::time::Duration;
 use teloxide::prelude::*;
 use tokio::time::{interval, timeout};
+
+#[derive(Deserialize)]
+struct Config {
+    timeout: f32,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Config { timeout: 90.0 }
+    }
+}
 
 fn command_execution(command: &str, args: &[&str]) -> Execution {
     use dog3::parser::format_string::FormatString;
@@ -42,6 +54,10 @@ pub async fn handle(
     }: Context,
 ) -> BotResult<()> {
     let mut cn = pool.get()?;
+    let config: Config = files::read(&mut cn, connected_chat_id, user_id, "config/bot.json")
+        .ok()
+        .and_then(|v| serde_json::from_slice(&v).ok())
+        .unwrap_or_default();
     let file = match files::read_for_execution(&mut cn, connected_chat_id, user_id, "main.dog") {
         Ok(file) => file,
         Err(_) => return Ok(()),
@@ -75,7 +91,7 @@ pub async fn handle(
                         }
                     });
 
-                    let result = timeout(Duration::from_secs(90), task).await;
+                    let result = timeout(Duration::from_secs_f32(config.timeout), task).await;
                     typer.abort();
 
                     match result {

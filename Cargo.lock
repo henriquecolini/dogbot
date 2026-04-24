@@ -524,7 +524,7 @@ dependencies = [
 [[package]]
 name = "dog3"
 version = "0.1.0"
-source = "git+https://github.com/henriquecolini/dog3.git#d4add8533735e4108b8d4e064baf625281c33d28"
+source = "git+https://github.com/henriquecolini/dog3.git#a19b9c26cbac14cbe6b2f2c3cfe077b6554358db"
 dependencies = [
  "async-recursion",
  "clap",
@@ -552,6 +552,8 @@ dependencies = [
  "env_logger",
  "log",
  "r2d2",
+ "serde",
+ "serde_json",
  "shlex 1.3.0 (git+https://github.com/henriquecolini/rust-shlex.git)",
  "teloxide",
  "thiserror 2.0.18",
