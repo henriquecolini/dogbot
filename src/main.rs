@@ -36,6 +36,7 @@ pub struct Context {
     message_content: String,
     reply_to_content: Option<String>,
     reply_to_from: Option<String>,
+    document: Option<Document>,
 }
 
 #[derive(Debug, Clone)]
@@ -101,7 +102,9 @@ async fn main() {
                         .branch(case![Command::Rm(c)].endpoint(rm::handle))
                         .branch(case![Command::Chmod(c)].endpoint(chmod::handle))
                         .branch(case![Command::Chown(c)].endpoint(chown::handle))
-                        .branch(case![Command::Id].endpoint(id::handle)),
+                        .branch(case![Command::Id].endpoint(id::handle))
+                        .branch(case![Command::Upload(c)].endpoint(upload::handle))
+                        .branch(case![Command::Download(c)].endpoint(download::handle)),
                 )
                 .branch(
                     dptree::entry()
@@ -157,22 +160,32 @@ async fn extract_context(pool: PgPool, msg: Message) -> Option<Context> {
             return None;
         }
     };
-    let (
-        MessageKind::Common(MessageCommon {
-            media_kind:
-                MediaKind::Text(MediaText {
-                    text: message_content,
-                    ..
-                }),
-            reply_to_message,
-            ..
-        }),
-        Some(user),
-        chat,
-    ) = (msg.kind, msg.from, msg.chat)
-    else {
-        warn!("Received message without text: {:?}", msg.id);
+    let chat = msg.chat;
+    let Some(user) = msg.from else {
         return None;
+    };
+    let (message_content, document, reply_to_message) = match msg.kind {
+        MessageKind::Common(msg) => match msg.media_kind {
+            MediaKind::Text(MediaText { text, .. }) => (text, None, msg.reply_to_message),
+            MediaKind::Document(MediaDocument {
+                caption, document, ..
+            }) => (
+                caption.unwrap_or_else(String::new),
+                Some(document),
+                msg.reply_to_message,
+            ),
+            MediaKind::Animation(MediaAnimation { caption, .. })
+            | MediaKind::Audio(MediaAudio { caption, .. })
+            | MediaKind::Photo(MediaPhoto { caption, .. })
+            | MediaKind::Video(MediaVideo { caption, .. })
+            | MediaKind::Voice(MediaVoice { caption, .. }) => (
+                caption.unwrap_or_else(String::new),
+                None,
+                msg.reply_to_message,
+            ),
+            _ => return None,
+        },
+        _ => return None,
     };
     let (chat_is_private, chat_name) = match chat.kind {
         ChatKind::Public(chat) => (false, chat.title.unwrap_or_default()),
@@ -207,23 +220,28 @@ async fn extract_context(pool: PgPool, msg: Message) -> Option<Context> {
         message_content,
         reply_to_content,
         reply_to_from,
+        document,
     })
 }
 
-async fn extract_maybe_command(bot: Bot, msg: Message, me: Me) -> Option<MaybeCommand> {
+async fn extract_maybe_command(
+    bot: Bot,
+    Context {
+        message_content,
+        chat_id,
+        ..
+    }: Context,
+    me: Me,
+) -> Option<MaybeCommand> {
     let bot_name = me.user.username.expect("Bots must have a username");
-    let Some(text) = msg.text().or_else(|| msg.caption()) else {
-        return None;
-    };
-    match Command::parse(text, &bot_name) {
+    if !message_content.starts_with('/') {
+        return Some(MaybeCommand::NotACommand);
+    }
+    match Command::parse(&message_content, &bot_name) {
         Ok(command) => Some(MaybeCommand::Command(command)),
+        Err(ParseError::WrongBotName(_)) => None,
         Err(err) => {
-            if let ParseError::UnknownCommand(uc) = &err {
-                if !uc.starts_with('/') {
-                    return Some(MaybeCommand::NotACommand);
-                }
-            }
-            if let Err(err) = bot.send_code(msg.chat.id, err.to_string()).await {
+            if let Err(err) = bot.send_code(chat_id, err.to_string()).await {
                 error!("Failed to send error message: {}", err);
             }
             None

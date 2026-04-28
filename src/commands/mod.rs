@@ -2,27 +2,31 @@ use clap::{FromArgMatches, Parser};
 use std::any::type_name;
 use teloxide::utils::command::{BotCommands, ParseError};
 
-pub mod hostname;
 pub mod chmod;
 pub mod chown;
 pub mod connect;
 pub mod disconnect;
+pub mod download;
 pub mod help;
+pub mod hostname;
 pub mod id;
 pub mod ls;
 pub mod mkdir;
 pub mod read;
 pub mod rm;
+pub mod upload;
 pub mod write;
 
-use hostname::HostnameCommand;
 use chmod::ChmodCommand;
 use chown::ChownCommand;
 use connect::ConnectCommand;
+use download::DownloadCommand;
+use hostname::HostnameCommand;
 use ls::LsCommand;
 use mkdir::MkdirCommand;
 use read::ReadCommand;
 use rm::RmCommand;
+use upload::UploadCommand;
 use write::WriteCommand;
 
 #[derive(BotCommands, Clone, Debug, PartialEq)]
@@ -54,6 +58,10 @@ pub enum Command {
     Chown(ChownCommand),
     #[command(description = "shows current user and chat IDs")]
     Id,
+    #[command(description = "uploads data to a file, creating it if it doesn't exist")]
+    Upload(UploadCommand),
+    #[command(description = "downloads a file")]
+    Download(DownloadCommand),
 }
 
 fn parse_args<T: Parser>(input: String) -> Result<(T,), ParseError> {

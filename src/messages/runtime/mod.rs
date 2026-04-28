@@ -37,7 +37,7 @@ async fn read(
         }
     };
     match crate::files::read(&mut cn, chat_id, user_id, path) {
-        Ok(file) => {
+        Ok((_, file)) => {
             let string = String::from_utf8_lossy(&file).into_owned();
             Ok(Output::new_truthy_with(string.into()))
         }

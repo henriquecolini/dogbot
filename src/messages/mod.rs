@@ -56,9 +56,9 @@ pub async fn handle(
     let mut cn = pool.get()?;
     let config: Config = files::read(&mut cn, connected_chat_id, user_id, "config/bot.json")
         .ok()
-        .and_then(|v| serde_json::from_slice(&v).ok())
+        .and_then(|(_,v)| serde_json::from_slice(&v).ok())
         .unwrap_or_default();
-    let file = match files::read_for_execution(&mut cn, connected_chat_id, user_id, "main.dog") {
+    let (_, file) = match files::read_for_execution(&mut cn, connected_chat_id, user_id, "main.dog") {
         Ok(file) => file,
         Err(_) => return Ok(()),
     };

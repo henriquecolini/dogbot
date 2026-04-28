@@ -140,7 +140,7 @@ pub fn read(
     chat_id: ChatId,
     user_id: UserId,
     path: &str,
-) -> Result<Vec<u8>, FileError> {
+) -> Result<(String, Vec<u8>), FileError> {
     cn.transaction(|cn| {
         let path = Path::parse(path, chat_id);
         let trav = path.traverse(cn, user_id)?.required()?;
@@ -155,7 +155,8 @@ pub fn read(
             return Err(FileError::NotEnoughPermissions(file.name));
         }
 
-        Ok(file.read(cn)?)
+        let content = file.read(cn)?;
+        Ok((file.name, content))
     })
 }
 
@@ -164,7 +165,7 @@ pub fn read_for_execution(
     chat_id: ChatId,
     user_id: UserId,
     path: &str,
-) -> Result<Vec<u8>, FileError> {
+) -> Result<(String, Vec<u8>), FileError> {
     cn.transaction(|cn| {
         let path = Path::parse(path, chat_id);
         let trav = path.traverse(cn, user_id)?.required()?;
@@ -179,7 +180,8 @@ pub fn read_for_execution(
             return Err(FileError::NotEnoughPermissions(file.name));
         }
 
-        Ok(file.read(cn)?)
+        let content = file.read(cn)?;
+        Ok((file.name, content))
     })
 }
 
