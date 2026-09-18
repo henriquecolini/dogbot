@@ -1,6 +1,4 @@
 /target
 .env
-/node_modules
 /.idea
 /.vscode
-docker-compose.override.yml
