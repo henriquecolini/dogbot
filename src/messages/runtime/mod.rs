@@ -8,13 +8,21 @@
 use crate::prelude::*;
 use dog4::{Error, Library, Map, Value};
 use log::*;
+use std::cell::RefCell;
+use std::rc::Rc;
 use teloxide::prelude::*;
+
+/// Scripts queued by `later`, to run once the reply has been sent.
+pub type Later = Rc<RefCell<Vec<String>>>;
 
 #[derive(Clone)]
 pub struct State {
     pub pool: PgPool,
     pub chat_id: ChatId,
     pub user_id: UserId,
+    /// `None` in a run that is itself deferred, so a background script can't
+    /// queue another one and chain forever.
+    pub later: Option<Later>,
 }
 
 impl State {
@@ -146,6 +154,27 @@ pub fn build(state: State) -> Value {
             Ok(Value::arr(rows))
         });
     }
+
+    // Queues a script to run after this message has been answered, so slow
+    // upkeep (summarising, reindexing) doesn't hold up the reply. The script is
+    // checked now, so a typo fails here rather than silently in the background.
+    let s = state.clone();
+    lib.def("later", "path: str", move |vm, args| {
+        let Some(later) = &s.later else {
+            return Err(Error::value_error(
+                "later is not available in a deferred run",
+            ));
+        };
+        let path = args[0].to_string();
+        let mut cn = s.connect()?;
+        files::read_for_execution(&mut cn, s.chat_id, s.user_id, &path).map_err(fs_error)?;
+        vm.meter().check_now()?;
+        let mut queue = later.borrow_mut();
+        if !queue.contains(&path) {
+            queue.push(path);
+        }
+        Ok(Value::Null)
+    });
 
     lib.def("version", "", |_, _| {
         Ok(Value::str(option_env!("APP_VERSION").unwrap_or("dev")))

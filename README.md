@@ -115,6 +115,13 @@ use read, write, ls, exists, history, version from mod bot;
 | `ls path [files] [dirs]` | an **array** of names |
 | `history [count] [offset] [with_bot]` | recent messages as maps of `user`, `content`, `is_bot` |
 | `version` | the running build |
+| `later path` | runs the script at `path` once this message has been answered |
+
+`later` is for upkeep nobody should wait on: summarising, reindexing, warming
+a cache. The script is checked for read and execute when queued and runs in the
+background after the reply is sent, with the same globals and permissions. Its
+output is discarded and its errors only logged. A chat runs one deferred script
+at a time, and a deferred script can't queue another.
 
 Failures raise catchable errors rather than returning a status code:
 

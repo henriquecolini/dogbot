@@ -53,7 +53,28 @@ impl Harness {
                 reply: reply.to_string(),
                 reply_from: reply_from.to_string(),
             },
+            None,
         )
+    }
+
+    /// Runs `source` as a message would, returning what it queued with `later`.
+    fn run_queueing(&self, source: &str) -> (Result<String, String>, Vec<String>) {
+        let later = runtime::Later::default();
+        let out = run_script(
+            self.pool.clone(),
+            self.chat,
+            USER,
+            source,
+            &Config::default(),
+            &ScriptContext {
+                message: String::new(),
+                sender: "Tester".to_string(),
+                reply: String::new(),
+                reply_from: String::new(),
+            },
+            Some(later.clone()),
+        );
+        (out, later.take())
     }
 }
 
@@ -247,6 +268,7 @@ fn an_endless_loop_hits_the_time_limit() {
             reply: String::new(),
             reply_from: String::new(),
         },
+        None,
     )
     .unwrap_err();
     assert!(
@@ -275,6 +297,7 @@ fn net_is_withheld_when_the_config_says_so() {
             reply: String::new(),
             reply_from: String::new(),
         },
+        None,
     )
     .unwrap_err();
     assert!(err.contains("get"), "unexpected error: {err}");
@@ -350,4 +373,41 @@ fn the_message_globals_are_visible_inside_a_module() {
         .run_as("use who from mod lib/who; who", "oi bot", "texto", "Ana")
         .unwrap();
     assert_eq!(out, "Tester/Ana/texto/oi bot");
+}
+
+#[test]
+fn later_queues_a_script_once() {
+    script_test!(h);
+    h.write("jobs/tidy.dog", "pln tidied");
+    h.make_executable("jobs/tidy.dog");
+    let (out, queued) = h.run_queueing(
+        "use later from mod bot; later jobs/tidy.dog; later jobs/tidy.dog; put queued",
+    );
+    assert_eq!(out.unwrap(), "queued");
+    assert_eq!(queued, vec!["jobs/tidy.dog".to_string()]);
+}
+
+/// Checked when queued, so a mistake surfaces in the reply instead of only in
+/// the server log once the background run fails.
+#[test]
+fn later_refuses_a_script_that_cannot_run() {
+    script_test!(h);
+    h.write("jobs/plain.dog", "pln nope");
+    let (out, queued) = h.run_queueing(
+        "use later from mod bot; put (try { later jobs/missing.dog } catch e { put missing; });
+         put (try { later jobs/plain.dog } catch e { put \" denied\" })",
+    );
+    assert_eq!(out.unwrap(), "missing denied");
+    assert!(queued.is_empty());
+}
+
+#[test]
+fn a_deferred_run_cannot_queue_another() {
+    script_test!(h);
+    h.write("jobs/tidy.dog", "pln tidied");
+    h.make_executable("jobs/tidy.dog");
+    let out = h
+        .run("use later from mod bot; put (try { later jobs/tidy.dog } catch e { put $e.message })")
+        .unwrap();
+    assert!(out.contains("deferred"), "unexpected: {out}");
 }
