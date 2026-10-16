@@ -1,16 +1,19 @@
 // Small text helpers that most chat scripts end up rewriting.
 //
-// Two dog4 habits worth copying here: a bare `if` discards its value, so a
-// function returning one wraps it in parentheses; and `{ … }` inside a double
+// Three dog4 habits worth copying here: a bare `if` discards its value, so a
+// function returning one wraps it in parentheses; `{ … }` inside a double
 // quoted string is literal text, not a substitution, so results are computed
-// into variables first.
+// into variables first; and a command only runs inside a block, so `( … )`
+// holds operators and values but never `len $x`.
 
 // Shortens `text` to at most `max` characters, adding an ellipsis when cut.
 pub fn truncate (text: str, max: num) {
     put (if ({ strlen $text } <= $max) {
         put $text
     } else {
-        head = { join { first { chars $text } ($max - 1) } "" };
+        // A slice clamps instead of giving null when there are fewer
+        // characters than asked for, unlike `first`.
+        head = $text[..($max - 1)];
         put "$head…"
     })
 }
