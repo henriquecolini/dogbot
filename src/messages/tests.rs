@@ -29,6 +29,18 @@ impl Harness {
     }
 
     fn run(&self, source: &str) -> Result<String, String> {
+        self.run_as(source, "hello world", "", "")
+    }
+
+    /// Runs `source` with a chosen message and reply, for scripts that read the
+    /// `message`, `reply` and `reply_from` globals.
+    fn run_as(
+        &self,
+        source: &str,
+        message: &str,
+        reply: &str,
+        reply_from: &str,
+    ) -> Result<String, String> {
         run_script(
             self.pool.clone(),
             self.chat,
@@ -36,10 +48,10 @@ impl Harness {
             source,
             &Config::default(),
             &ScriptContext {
-                message: "hello world".to_string(),
+                message: message.to_string(),
                 sender: "Tester".to_string(),
-                reply: String::new(),
-                reply_from: String::new(),
+                reply: reply.to_string(),
+                reply_from: reply_from.to_string(),
             },
         )
     }
@@ -320,4 +332,22 @@ fn a_cross_chat_import_needs_the_others_execute_bit() {
     }
 
     assert_eq!(h.run(&source).unwrap(), "4");
+}
+
+/// The chat's scripts depend on this. A module can't see the variables of the
+/// code that imported it, so a command module reads the message context
+/// straight from the globals; that only works because the host installs them
+/// alongside the builtins.
+#[test]
+fn the_message_globals_are_visible_inside_a_module() {
+    script_test!(h);
+    h.write(
+        "lib/who.dog",
+        r#"pub fn who () { put "$sender/$reply_from/$reply/$message" }"#,
+    );
+    h.make_executable("lib/who.dog");
+    let out = h
+        .run_as("use who from mod lib/who; who", "oi bot", "texto", "Ana")
+        .unwrap();
+    assert_eq!(out, "Tester/Ana/texto/oi bot");
 }
