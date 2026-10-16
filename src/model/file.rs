@@ -252,6 +252,17 @@ impl File {
             .map(|opt: Option<Vec<u8>>| opt.unwrap_or_default())
     }
 
+    /// Replaces a file's content by id, leaving its name and parent alone.
+    /// `upsert_file` addresses a file by `(parent, name)`, which is the wrong
+    /// handle for an open file: SFTP clients rename files while they hold them
+    /// open. Returns false if the row is gone.
+    pub fn set_content(cn: &mut PgConnection, id: Uuid, content: &[u8]) -> QueryResult<bool> {
+        update(files::files.filter(files::id.eq(id)))
+            .set(files::content.eq(content))
+            .execute(cn)
+            .map(|rows| rows > 0)
+    }
+
     /// Moves and/or renames a file. Used by `rename`, which SFTP clients rely on
     /// for atomic saves.
     pub fn set_parent_and_name(
@@ -265,7 +276,11 @@ impl File {
             .returning(File::as_select())
             .get_result(cn)
     }
-    pub fn set_owner(cn: &mut PgConnection, id: Uuid, owner_id: Option<UserId>) -> QueryResult<usize> {
+    pub fn set_owner(
+        cn: &mut PgConnection,
+        id: Uuid,
+        owner_id: Option<UserId>,
+    ) -> QueryResult<usize> {
         update(files::files.filter(files::id.eq(id)))
             .set(files::owner_id.eq(owner_id.map(|id| id.0 as i64)))
             .execute(cn)

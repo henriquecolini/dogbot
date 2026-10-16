@@ -35,18 +35,20 @@ fn setup() -> Option<(PgConnection, ChatId)> {
     let url = std::env::var("TEST_DATABASE_URL").ok()?;
     let mut cn = PgConnection::establish(&url).expect("connect to TEST_DATABASE_URL");
 
-    // Tests run in parallel; migrating concurrently deadlocks or double-applies.
-    static MIGRATED: Once = Once::new();
-    MIGRATED.call_once(|| {
-        let mut cn = PgConnection::establish(&url).expect("connect to TEST_DATABASE_URL");
-        crate::run_migrations(&mut cn);
-    });
+    crate::run_migrations_once(&mut cn);
 
     let chat_id = next_chat_id();
     Chat::upsert(&mut cn, chat_id, Some("test"), true).unwrap();
 
     for (id, name) in [(OWNER, "owner"), (MEMBER, "member"), (OUTSIDER, "outsider")] {
-        User::upsert(&mut cn, id, name, None, Some(&format!("{name}{}", chat_id.0))).unwrap();
+        User::upsert(
+            &mut cn,
+            id,
+            name,
+            None,
+            Some(&format!("{name}{}", chat_id.0)),
+        )
+        .unwrap();
     }
     UserInChat::upsert(&mut cn, OWNER, chat_id).unwrap();
     UserInChat::upsert(&mut cn, MEMBER, chat_id).unwrap();
@@ -253,7 +255,10 @@ fn rename_over_a_file_keeps_the_destination_permissions() {
     rename(cn, chat, OWNER, ".main.dog.tmp", "main.dog").unwrap();
 
     let saved = stat(cn, chat, OWNER, "main.dog").unwrap();
-    assert!(saved.user_execute, "an editor save stripped the execute bit");
+    assert!(
+        saved.user_execute,
+        "an editor save stripped the execute bit"
+    );
     assert_eq!(read(cn, chat, OWNER, "main.dog").unwrap().1, b"new");
 }
 

@@ -34,9 +34,13 @@ Register a public key once, then mount:
 /mount
 
 # on your machine
-sshfs -p 2222 myproject@<host>:/ ~/mnt/dogbot
+sshfs -p 2222 -o uid=$(id -u),gid=$(id -g) myproject@<host>:/ ~/mnt/dogbot
 code ~/mnt/dogbot
 ```
+
+`uid`/`gid` map the files onto your local account. Without them a listing shows
+each owner's Telegram ID, and tools that preserve ownership on save (`sed -i`,
+`cp -p`) warn on every write.
 
 The SSH **username is the chat** (its `/hostname`, or `chat<id>` for a numeric
 ID) and the **key is you**. A mount gives you exactly the access you already

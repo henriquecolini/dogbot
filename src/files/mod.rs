@@ -255,7 +255,9 @@ pub fn rename(
 
         let from_trav = from_path.traverse(cn, user_id)?.required()?;
         if !from_trav.parent().can_write(cn, user_id)? {
-            return Err(FileError::NotEnoughPermissions(from_trav.into_parent().name));
+            return Err(FileError::NotEnoughPermissions(
+                from_trav.into_parent().name,
+            ));
         }
         let (from_parent, file) = from_trav.into_parent_and_file();
 
@@ -357,22 +359,31 @@ pub fn set_mode(
     cn.transaction(|cn| {
         let path = Path::parse(path, chat_id);
         let file = path.traverse(cn, user_id)?.required()?.into_file();
-
-        if file.owner_id != Some(user_id.0 as i64) {
-            return Err(FileError::NotEnoughPermissions(file.name));
-        }
-
-        File::set_user_read(cn, file.id, mode & 0o400 != 0)?;
-        File::set_user_write(cn, file.id, mode & 0o200 != 0)?;
-        File::set_user_execute(cn, file.id, mode & 0o100 != 0)?;
-        File::set_group_read(cn, file.id, mode & 0o040 != 0)?;
-        File::set_group_write(cn, file.id, mode & 0o020 != 0)?;
-        File::set_group_execute(cn, file.id, mode & 0o010 != 0)?;
-        File::set_others_read(cn, file.id, mode & 0o004 != 0)?;
-        File::set_others_write(cn, file.id, mode & 0o002 != 0)?;
-        File::set_others_execute(cn, file.id, mode & 0o001 != 0)?;
-        Ok(())
+        apply_mode(cn, &file, user_id, mode)
     })
+}
+
+/// The body of `set_mode`, once the file has been resolved.
+fn apply_mode(
+    cn: &mut PgConnection,
+    file: &File,
+    user_id: UserId,
+    mode: u32,
+) -> Result<(), FileError> {
+    if file.owner_id != Some(user_id.0 as i64) {
+        return Err(FileError::NotEnoughPermissions(file.name.clone()));
+    }
+
+    File::set_user_read(cn, file.id, mode & 0o400 != 0)?;
+    File::set_user_write(cn, file.id, mode & 0o200 != 0)?;
+    File::set_user_execute(cn, file.id, mode & 0o100 != 0)?;
+    File::set_group_read(cn, file.id, mode & 0o040 != 0)?;
+    File::set_group_write(cn, file.id, mode & 0o020 != 0)?;
+    File::set_group_execute(cn, file.id, mode & 0o010 != 0)?;
+    File::set_others_read(cn, file.id, mode & 0o004 != 0)?;
+    File::set_others_write(cn, file.id, mode & 0o002 != 0)?;
+    File::set_others_execute(cn, file.id, mode & 0o001 != 0)?;
+    Ok(())
 }
 
 /// Changes a file's owner. Only the current owner may give a file away.
@@ -481,4 +492,83 @@ pub fn set_permission(
         }
         Ok(())
     })
+}
+
+/// Operations on a file that is already open, addressed by id instead of by
+/// path.
+///
+/// A path is the wrong handle for an open file. Editors save atomically by
+/// writing a temporary file and renaming it over the target *while still
+/// holding it open*, so by the time the handle is flushed its original path
+/// either names a different file or nothing at all. Resolving the path again at
+/// that point writes the content to the wrong place and leaves the renamed file
+/// empty. These functions follow the row, which is what a Unix file descriptor
+/// does.
+pub mod open {
+    use super::*;
+
+    /// The file behind an open handle. No permission check: the handle was
+    /// authorised when it was opened, as with `fstat`.
+    pub fn stat(cn: &mut PgConnection, id: Uuid) -> Result<File, FileError> {
+        File::try_get(cn, id)?.ok_or(FileError::FileNotFound(id.to_string()))
+    }
+
+    /// Replaces the file's content. Returns false if the file has since been
+    /// deleted, which mirrors Unix: writes to an unlinked file go nowhere.
+    pub fn write(
+        cn: &mut PgConnection,
+        user_id: UserId,
+        id: Uuid,
+        content: &[u8],
+    ) -> Result<bool, FileError> {
+        cn.transaction(|cn| {
+            let Some(file) = File::try_get(cn, id)? else {
+                return Ok(false);
+            };
+            if file.is_dir() {
+                return Err(FileError::NotAFile(file.name));
+            }
+            if !file.can_write(cn, user_id)? {
+                return Err(FileError::NotEnoughPermissions(file.name));
+            }
+            Ok(File::set_content(cn, id, content)?)
+        })
+    }
+
+    /// Changes the file's permission bits.
+    pub fn set_mode(
+        cn: &mut PgConnection,
+        user_id: UserId,
+        id: Uuid,
+        mode: u32,
+    ) -> Result<(), FileError> {
+        cn.transaction(|cn| {
+            let file = stat(cn, id)?;
+            apply_mode(cn, &file, user_id, mode)
+        })
+    }
+
+    /// Shortens the file to `size` bytes. Growing a file is left to `write`,
+    /// which pads as needed.
+    pub fn truncate(
+        cn: &mut PgConnection,
+        user_id: UserId,
+        id: Uuid,
+        size: u64,
+    ) -> Result<(), FileError> {
+        cn.transaction(|cn| {
+            let file = stat(cn, id)?;
+            if file.is_dir() {
+                return Err(FileError::NotAFile(file.name));
+            }
+            if !file.can_write(cn, user_id)? {
+                return Err(FileError::NotEnoughPermissions(file.name));
+            }
+            let content = file.read(cn)?;
+            if (size as usize) < content.len() {
+                File::set_content(cn, id, &content[..size as usize])?;
+            }
+            Ok(())
+        })
+    }
 }

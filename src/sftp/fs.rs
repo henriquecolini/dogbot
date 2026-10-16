@@ -12,6 +12,7 @@ use russh_sftp::protocol::{
 };
 use std::collections::HashMap;
 use teloxide::prelude::*;
+use uuid::Uuid;
 
 /// Largest file the mount will hold in memory. Content lives in a single
 /// `BYTEA` column, so reads and writes are whole-file operations.
@@ -19,9 +20,23 @@ const MAX_FILE_BYTES: usize = 8 * 1024 * 1024;
 
 /// An open handle. Content is buffered because the database stores each file as
 /// one blob while SFTP reads and writes ranges of it.
+///
+/// A file handle holds the file's `id`, never its path. Clients rename files
+/// they are holding open — that is how every atomic save works — so a path
+/// captured at `open` names the wrong file, or none, by the time the next write
+/// arrives. The buffer is the current content; writes go through to the
+/// database as they are made.
 enum Open {
-    Dir { entries: Vec<SftpFile>, sent: bool },
-    File { path: String, buf: Vec<u8>, dirty: bool },
+    Dir {
+        entries: Vec<SftpFile>,
+        sent: bool,
+    },
+    File {
+        id: Uuid,
+        buf: Vec<u8>,
+        readable: bool,
+        writable: bool,
+    },
 }
 
 pub struct DogFs {
@@ -71,6 +86,15 @@ impl DogFs {
                 log::error!("sftp: blocking task failed: {err}");
                 Err(StatusCode::Failure)
             }
+        }
+    }
+
+    /// The file behind a handle, or `Failure` if the handle is a directory or
+    /// was never opened.
+    fn file_id(&self, handle: &str) -> Result<Uuid, StatusCode> {
+        match self.handles.get(handle) {
+            Some(Open::File { id, .. }) => Ok(*id),
+            _ => Err(StatusCode::Failure),
         }
     }
 
@@ -212,11 +236,18 @@ impl russh_sftp::server::Handler for DogFs {
     }
 
     async fn fstat(&mut self, id: u32, handle: String) -> Result<Attrs, Self::Error> {
-        let path = match self.handles.get(&handle) {
-            Some(Open::File { path, .. }) => path.clone(),
-            _ => return Err(StatusCode::Failure),
-        };
-        self.stat(id, path).await
+        let file_id = self.file_id(&handle)?;
+        let (file, size) = self
+            .db(move |cn| {
+                let file = files::open::stat(cn, file_id)?;
+                let size = model::File::size(cn, file.id)?;
+                Ok((file, size))
+            })
+            .await?;
+        Ok(Attrs {
+            id,
+            attrs: attrs_for(&file, size, None),
+        })
     }
 
     async fn opendir(&mut self, id: u32, path: String) -> Result<Handle, Self::Error> {
@@ -235,8 +266,9 @@ impl russh_sftp::server::Handler for DogFs {
                 let mut entries = Vec::with_capacity(children.len());
                 for (child, size) in children {
                     let owner = match child.owner_id {
-                        Some(owner_id) => model::User::try_get(cn, UserId(owner_id as u64))?
-                            .map(|u| u.first_name),
+                        Some(owner_id) => {
+                            model::User::try_get(cn, UserId(owner_id as u64))?.map(|u| u.first_name)
+                        }
                         None => Some("root".to_string()),
                     };
                     let attrs = attrs_for(&child, size, owner.as_deref());
@@ -284,9 +316,13 @@ impl russh_sftp::server::Handler for DogFs {
         let truncate = pflags.contains(OpenFlags::TRUNCATE);
         let create = pflags.contains(OpenFlags::CREATE);
         let exclude = pflags.contains(OpenFlags::EXCLUDE);
+        let writable = pflags.intersects(OpenFlags::WRITE | OpenFlags::APPEND);
+        // A handle with neither flag set is of no use to anyone; read is the
+        // safer reading of it.
+        let readable = pflags.contains(OpenFlags::READ) || !writable;
 
         let probe = path.clone();
-        let (buf, dirty) = self
+        let (file_id, buf) = self
             .db(move |cn| {
                 let existing = match files::stat(cn, chat, user, &probe) {
                     Ok(file) => Some(file),
@@ -301,18 +337,27 @@ impl russh_sftp::server::Handler for DogFs {
                     // close: a client may stat the path straight after opening
                     // it, and sshfs does exactly that before writing a byte.
                     Some(_) if truncate => {
-                        files::write(cn, chat, user, &probe, b"")?;
-                        Ok((Vec::new(), false))
+                        let file = files::write(cn, chat, user, &probe, b"")?;
+                        Ok((file.id, Vec::new()))
                     }
                     Some(file) => {
-                        if !file.can_read(cn, user)? {
+                        // Refusing here rather than at `close` matters: a client
+                        // that only finds out on flush has already told the user
+                        // the save succeeded.
+                        if readable && !file.can_read(cn, user)? {
                             return Err(files::FileError::NotEnoughPermissions(file.name));
                         }
-                        Ok((file.read(cn)?, false))
+                        if writable && !file.can_write(cn, user)? {
+                            return Err(files::FileError::NotEnoughPermissions(file.name));
+                        }
+                        // Seeded even for a write-only handle, so that a partial
+                        // write doesn't blank the rest of the file.
+                        let content = file.read(cn)?;
+                        Ok((file.id, content))
                     }
                     None if create => {
-                        files::write(cn, chat, user, &probe, b"")?;
-                        Ok((Vec::new(), false))
+                        let file = files::write(cn, chat, user, &probe, b"")?;
+                        Ok((file.id, Vec::new()))
                     }
                     None => Err(files::FileError::FileNotFound(probe)),
                 }
@@ -320,8 +365,19 @@ impl russh_sftp::server::Handler for DogFs {
             .await?;
 
         let handle = self.fresh_handle();
-        self.handles
-            .insert(handle.clone(), Open::File { path, buf, dirty });
+        log::debug!(
+            "sftp: open {path} as handle {handle} -> {file_id} ({} bytes, r={readable} w={writable})",
+            buf.len()
+        );
+        self.handles.insert(
+            handle.clone(),
+            Open::File {
+                id: file_id,
+                buf,
+                readable,
+                writable,
+            },
+        );
         Ok(Handle { id, handle })
     }
 
@@ -332,9 +388,12 @@ impl russh_sftp::server::Handler for DogFs {
         offset: u64,
         len: u32,
     ) -> Result<Data, Self::Error> {
-        let Some(Open::File { buf, .. }) = self.handles.get(&handle) else {
+        let Some(Open::File { buf, readable, .. }) = self.handles.get(&handle) else {
             return Err(StatusCode::Failure);
         };
+        if !readable {
+            return Err(StatusCode::PermissionDenied);
+        }
         let offset = offset as usize;
         if offset >= buf.len() {
             return Err(StatusCode::Eof);
@@ -353,9 +412,18 @@ impl russh_sftp::server::Handler for DogFs {
         offset: u64,
         data: Vec<u8>,
     ) -> Result<Status, Self::Error> {
-        let Some(Open::File { buf, dirty, .. }) = self.handles.get_mut(&handle) else {
+        let Some(Open::File {
+            id: file_id,
+            buf,
+            writable,
+            ..
+        }) = self.handles.get_mut(&handle)
+        else {
             return Err(StatusCode::Failure);
         };
+        if !*writable {
+            return Err(StatusCode::PermissionDenied);
+        }
         let offset = offset as usize;
         if offset + data.len() > MAX_FILE_BYTES {
             return Err(StatusCode::Failure);
@@ -368,7 +436,25 @@ impl russh_sftp::server::Handler for DogFs {
             buf.resize(end, 0);
         }
         buf[offset..end].copy_from_slice(&data);
-        *dirty = true;
+
+        // Persisted now rather than at close, so the file is never observably
+        // empty while it is being written. Clients stat mid-save — GIO does it
+        // immediately after renaming its temp file over the target — and both
+        // FUSE and the editor will happily cache a size of zero. The whole blob
+        // goes back each time, which is the price of storing content in one
+        // column; these are scripts, and `MAX_FILE_BYTES` bounds the worst case.
+        let (file_id, snapshot) = (*file_id, buf.clone());
+        log::debug!(
+            "sftp: write {} bytes at {offset} to handle {handle} -> {file_id}",
+            data.len()
+        );
+        let user = self.user_id;
+        let existed = self
+            .db(move |cn| files::open::write(cn, user, file_id, &snapshot))
+            .await?;
+        if !existed {
+            return Err(StatusCode::NoSuchFile);
+        }
         Ok(self.ok(id))
     }
 
@@ -376,12 +462,14 @@ impl russh_sftp::server::Handler for DogFs {
         let Some(open) = self.handles.remove(&handle) else {
             return Err(StatusCode::Failure);
         };
-        if let Open::File { path, buf, dirty } = open
-            && dirty
+        if let Open::File {
+            id: file_id, buf, ..
+        } = &open
         {
-            let (chat, user) = (self.chat_id, self.user_id);
-            self.db(move |cn| files::write(cn, chat, user, &path, &buf).map(|_| ()))
-                .await?;
+            log::debug!(
+                "sftp: close handle {handle} -> {file_id} ({} bytes)",
+                buf.len()
+            );
         }
         Ok(self.ok(id))
     }
@@ -434,8 +522,10 @@ impl russh_sftp::server::Handler for DogFs {
         let from = normalize(&oldpath)?;
         let to = normalize(&newpath)?;
         let (chat, user) = (self.chat_id, self.user_id);
-        self.db(move |cn| files::rename(cn, chat, user, &from, &to).map(|_| ()))
+        let renamed = self
+            .db(move |cn| files::rename(cn, chat, user, &from, &to))
             .await?;
+        log::debug!("sftp: rename {oldpath} -> {newpath} ({})", renamed.id);
         Ok(self.ok(id))
     }
 
@@ -473,10 +563,28 @@ impl russh_sftp::server::Handler for DogFs {
         handle: String,
         attrs: FileAttributes,
     ) -> Result<Status, Self::Error> {
-        let path = match self.handles.get(&handle) {
-            Some(Open::File { path, .. }) => path.clone(),
-            _ => return Err(StatusCode::Failure),
-        };
-        self.setstat(id, path, attrs).await
+        let file_id = self.file_id(&handle)?;
+        let user = self.user_id;
+        let mode = attrs.permissions.map(|m| m & 0o777);
+        let size = attrs.size;
+
+        self.db(move |cn| {
+            if let Some(mode) = mode {
+                files::open::set_mode(cn, user, file_id, mode)?;
+            }
+            if let Some(size) = size {
+                files::open::truncate(cn, user, file_id, size)?;
+            }
+            Ok(())
+        })
+        .await?;
+        // Keep the buffer in step with the row, or the next partial write
+        // would grow the file back out of the stale copy.
+        if let (Some(size), Some(Open::File { buf, .. })) = (size, self.handles.get_mut(&handle))
+            && (size as usize) < buf.len()
+        {
+            buf.truncate(size as usize);
+        }
+        Ok(self.ok(id))
     }
 }

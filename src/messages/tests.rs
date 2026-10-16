@@ -54,11 +54,7 @@ fn setup() -> Option<Harness> {
         .build(diesel::r2d2::ConnectionManager::new(url.clone()))
         .expect("pool");
 
-    static MIGRATED: Once = Once::new();
-    MIGRATED.call_once(|| {
-        let mut cn = pool.get().unwrap();
-        crate::run_migrations(&mut cn);
-    });
+    crate::run_migrations_once(&mut pool.get().unwrap());
 
     static NEXT: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
     static BASE: Once = Once::new();
@@ -109,7 +105,10 @@ fn context_arrives_as_globals() {
 #[test]
 fn a_chat_local_module_is_importable() {
     script_test!(h);
-    h.write("lib/greet.dog", "pub fn hi (name: str) { put \"hi $name\" }");
+    h.write(
+        "lib/greet.dog",
+        "pub fn hi (name: str) { put \"hi $name\" }",
+    );
     h.make_executable("lib/greet.dog");
 
     assert_eq!(

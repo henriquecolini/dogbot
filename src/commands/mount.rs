@@ -35,8 +35,12 @@ pub async fn handle(
         reply.push_str("  /key add ssh-ed25519 AAAA... you@host\n\n");
     }
 
+    // `uid`/`gid` make the files show up as the local user's. Without them a
+    // listing shows the owner's Telegram id, and tools that try to preserve
+    // ownership on save — sed, cp -p — warn about it on every write.
     reply.push_str(&format!(
-        "mkdir -p ~/mnt/dogbot\nsshfs -p {port} {username}@{host}:/ ~/mnt/dogbot\n"
+        "mkdir -p ~/mnt/dogbot\n\
+         sshfs -p {port} -o uid=$(id -u),gid=$(id -g) {username}@{host}:/ ~/mnt/dogbot\n"
     ));
 
     if chat.as_ref().and_then(|c| c.alias.as_deref()).is_none() {

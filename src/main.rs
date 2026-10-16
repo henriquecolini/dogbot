@@ -56,6 +56,17 @@ fn run_migrations(cn: &mut impl MigrationHarness<pg::Pg>) {
         .expect("Could not run migrations");
 }
 
+/// Runs migrations once per test process.
+///
+/// Tests run in parallel and each builds its own connection; migrating
+/// concurrently double-applies. A single shared guard is needed rather than one
+/// per test module, since separate `Once`s don't serialise against each other.
+#[cfg(test)]
+fn run_migrations_once(cn: &mut impl MigrationHarness<pg::Pg>) {
+    static MIGRATED: std::sync::Once = std::sync::Once::new();
+    MIGRATED.call_once(|| run_migrations(cn));
+}
+
 fn get_connection_pool() -> PgPool {
     let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
     info!("Connecting to database at {}", database_url);
