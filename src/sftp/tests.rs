@@ -25,9 +25,9 @@ impl russh::client::Handler for AcceptAnyServer {
     }
 }
 
-/// Seeds a chat, two users and an SSH key, then starts a server on a free port.
-/// Returns the port, the chat's alias and the client key.
-async fn harness() -> Option<(u16, String, russh::keys::PrivateKey)> {
+/// Seeds a chat, two users and an SSH key. Returns the pool, the chat's alias
+/// and the client key, leaving it to the caller to start a server.
+async fn seeded_pool() -> Option<(PgPool, String, russh::keys::PrivateKey)> {
     let url = std::env::var("TEST_DATABASE_URL").ok()?;
 
     // Each test builds its own pool, so keep them small: the default of 10
@@ -69,6 +69,13 @@ async fn harness() -> Option<(u16, String, russh::keys::PrivateKey)> {
         )
         .unwrap();
     }
+
+    Some((pool, alias, key))
+}
+
+/// `seeded_pool`, plus a server on a free port with the production timings.
+async fn harness() -> Option<(u16, String, russh::keys::PrivateKey)> {
+    let (pool, alias, key) = seeded_pool().await?;
 
     // Bind port 0 to let the OS pick a free one and hand the live listener
     // straight to the server. Dropping it first and re-binding by number would
@@ -526,4 +533,40 @@ async fn a_write_is_visible_before_the_handle_closes() {
     let mut reader = sftp.open("/draft.dog").await.unwrap();
     reader.read_to_string(&mut got).await.unwrap();
     assert_eq!(got, "pln still open");
+}
+
+/// An idle session must stay usable.
+///
+/// `inactivity_timeout` alone bounded a connection regardless of whether the
+/// client was alive, so a mount left alone was dropped on the hour and sshfs
+/// was left wedged. Keepalives reset that timer, so a client that answers them
+/// keeps its session. The timings here are scaled down to seconds; in
+/// production they are 30s against an hour.
+#[tokio::test]
+async fn an_idle_session_survives_past_the_inactivity_timeout() {
+    let Some((pool, alias, key)) = seeded_pool().await else {
+        eprintln!("skipping: TEST_DATABASE_URL not set");
+        return;
+    };
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        let _ = super::run_with_timings(
+            pool,
+            listener,
+            std::time::Duration::from_millis(300),
+            std::time::Duration::from_secs(1),
+        )
+        .await;
+    });
+
+    let sftp = connect(port, &alias, &key).await.unwrap();
+    sftp.create_dir("/before").await.unwrap();
+
+    // Several times the inactivity timeout, with no SFTP traffic at all.
+    tokio::time::sleep(std::time::Duration::from_secs(4)).await;
+
+    sftp.create_dir("/after")
+        .await
+        .expect("the session must still be alive after sitting idle");
 }

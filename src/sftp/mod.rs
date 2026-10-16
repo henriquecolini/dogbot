@@ -27,6 +27,15 @@ use tokio::sync::Mutex;
 /// Where the persistent SSH host key is stored.
 const HOST_KEY_SETTING: &str = "ssh_host_key";
 
+/// How often to ask an idle client whether it is still there.
+const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(30);
+
+/// Unanswered keepalives before the connection is dropped.
+const KEEPALIVE_MAX: usize = 3;
+
+/// Backstop for a connection that goes quiet without the keepalives noticing.
+const INACTIVITY_TIMEOUT: Duration = Duration::from_secs(3600);
+
 /// Loads the host key, generating and persisting one on first boot.
 ///
 /// It lives in the database rather than on disk so no extra volume has to be
@@ -69,11 +78,32 @@ pub async fn run(pool: PgPool, bind: String) -> anyhow::Result<()> {
 /// address lets a caller learn the port before the server starts, which
 /// matters when the port was chosen by the OS.
 pub async fn run_on_listener(pool: PgPool, listener: tokio::net::TcpListener) -> anyhow::Result<()> {
+    run_with_timings(pool, listener, KEEPALIVE_INTERVAL, INACTIVITY_TIMEOUT).await
+}
+
+/// `run_on_listener` with the SSH timings spelled out, so a test can use ones
+/// short enough to observe.
+async fn run_with_timings(
+    pool: PgPool,
+    listener: tokio::net::TcpListener,
+    keepalive: Duration,
+    inactivity: Duration,
+) -> anyhow::Result<()> {
     let host_key = load_or_create_host_key(&pool)?;
 
+    // A mount sits idle for hours at a time, which is indistinguishable from a
+    // client that has gone away unless the server asks. Without keepalives the
+    // only thing bounding a connection is `inactivity_timeout`, so an idle
+    // mount was dropped on the hour and sshfs — which does not reconnect by
+    // itself — was left wedged. russh resets the inactivity timer on any
+    // traffic, a keepalive reply included, so asking every 30 seconds keeps a
+    // live connection up indefinitely while a dead one is let go after
+    // `KEEPALIVE_MAX` unanswered probes, about two minutes.
     let config = Config {
         auth_rejection_time: Duration::from_secs(1),
-        inactivity_timeout: Some(Duration::from_secs(3600)),
+        inactivity_timeout: Some(inactivity),
+        keepalive_interval: Some(keepalive),
+        keepalive_max: KEEPALIVE_MAX,
         keys: vec![host_key],
         ..Default::default()
     };

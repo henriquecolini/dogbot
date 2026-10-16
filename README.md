@@ -34,13 +34,27 @@ Register a public key once, then mount:
 /mount
 
 # on your machine
-sshfs -p 2222 -o uid=$(id -u),gid=$(id -g) myproject@<host>:/ ~/mnt/dogbot
+sshfs -p 2222 \
+  -o reconnect,ServerAliveInterval=15,ServerAliveCountMax=3 \
+  -o uid=$(id -u),gid=$(id -g) \
+  myproject@<host>:/ ~/mnt/dogbot
 code ~/mnt/dogbot
 ```
 
 `uid`/`gid` map the files onto your local account. Without them a listing shows
 each owner's Telegram ID, and tools that preserve ownership on save (`sed -i`,
 `cp -p`) warn on every write.
+
+`reconnect` is worth the typing: deploying the bot restarts the container and
+drops every connection, and sshfs on its own leaves a mount that answers every
+operation with `Input/output error` until you `fusermount3 -u` it. With
+`reconnect` the mount comes back by itself once the bot is up, though files
+that were open across the restart are lost. `ServerAliveInterval` is how the
+client notices promptly. The server sends keepalives of its own, so a mount
+that is merely idle is never dropped.
+
+If a mount does wedge — the symptom is a command on it hanging forever rather
+than failing — clear it with `fusermount3 -u -z ~/mnt/dogbot` and mount again.
 
 The SSH **username is the chat** (its `/hostname`, or `chat<id>` for a numeric
 ID) and the **key is you**. A mount gives you exactly the access you already

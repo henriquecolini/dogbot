@@ -424,14 +424,16 @@ impl russh_sftp::server::Handler for DogFs {
         if !*writable {
             return Err(StatusCode::PermissionDenied);
         }
+        // Checked, because the offset comes off the wire: wrapping would turn an
+        // absurd one into a small number that passes the size check and then
+        // asks for a multi-exabyte `resize`.
         let offset = offset as usize;
-        if offset + data.len() > MAX_FILE_BYTES {
+        let Some(end) = offset.checked_add(data.len()) else {
+            return Err(StatusCode::Failure);
+        };
+        if end > MAX_FILE_BYTES {
             return Err(StatusCode::Failure);
         }
-        if offset > buf.len() {
-            buf.resize(offset, 0);
-        }
-        let end = offset + data.len();
         if end > buf.len() {
             buf.resize(end, 0);
         }

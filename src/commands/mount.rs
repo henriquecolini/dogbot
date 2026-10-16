@@ -38,9 +38,17 @@ pub async fn handle(
     // `uid`/`gid` make the files show up as the local user's. Without them a
     // listing shows the owner's Telegram id, and tools that try to preserve
     // ownership on save — sed, cp -p — warn about it on every write.
+    //
+    // `reconnect` is what keeps the mount usable when the bot is redeployed:
+    // the container restart drops every connection, and sshfs on its own
+    // leaves a dead mount behind that only `fusermount -u` clears.
+    // `ServerAliveInterval` is how it notices promptly.
     reply.push_str(&format!(
         "mkdir -p ~/mnt/dogbot\n\
-         sshfs -p {port} -o uid=$(id -u),gid=$(id -g) {username}@{host}:/ ~/mnt/dogbot\n"
+         sshfs -p {port} \\\n\
+         \x20 -o reconnect,ServerAliveInterval=15,ServerAliveCountMax=3 \\\n\
+         \x20 -o uid=$(id -u),gid=$(id -g) \\\n\
+         \x20 {username}@{host}:/ ~/mnt/dogbot\n"
     ));
 
     if chat.as_ref().and_then(|c| c.alias.as_deref()).is_none() {
