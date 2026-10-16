@@ -47,7 +47,10 @@ impl Harness {
 
 fn setup() -> Option<Harness> {
     let url = std::env::var("TEST_DATABASE_URL").ok()?;
+    // Each test builds its own pool, so keep them small: the default of 10
+    // times the number of parallel tests exhausts Postgres's connection limit.
     let pool: PgPool = diesel::r2d2::Pool::builder()
+        .max_size(2)
         .build(diesel::r2d2::ConnectionManager::new(url.clone()))
         .expect("pool");
 

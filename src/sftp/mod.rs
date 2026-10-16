@@ -60,6 +60,15 @@ fn parse_username(user: &str) -> ChatAddress<'_> {
 }
 
 pub async fn run(pool: PgPool, bind: String) -> anyhow::Result<()> {
+    let addr: SocketAddr = bind.parse()?;
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    run_on_listener(pool, listener).await
+}
+
+/// Serves on an already-bound listener. Taking the socket rather than an
+/// address lets a caller learn the port before the server starts, which
+/// matters when the port was chosen by the OS.
+pub async fn run_on_listener(pool: PgPool, listener: tokio::net::TcpListener) -> anyhow::Result<()> {
     let host_key = load_or_create_host_key(&pool)?;
 
     let config = Config {
@@ -69,11 +78,10 @@ pub async fn run(pool: PgPool, bind: String) -> anyhow::Result<()> {
         ..Default::default()
     };
 
-    let addr: SocketAddr = bind.parse()?;
-    info!("SFTP server listening on {addr}");
+    info!("SFTP server listening on {}", listener.local_addr()?);
 
     let mut server = SftpServer { pool };
-    server.run_on_address(Arc::new(config), addr).await?;
+    server.run_on_socket(Arc::new(config), &listener).await?;
     Ok(())
 }
 

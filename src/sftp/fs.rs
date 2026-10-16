@@ -284,10 +284,9 @@ impl russh_sftp::server::Handler for DogFs {
         let truncate = pflags.contains(OpenFlags::TRUNCATE);
         let create = pflags.contains(OpenFlags::CREATE);
         let exclude = pflags.contains(OpenFlags::EXCLUDE);
-        let writing = pflags.contains(OpenFlags::WRITE) || pflags.contains(OpenFlags::APPEND);
 
         let probe = path.clone();
-        let (buf, dirty, existed) = self
+        let (buf, dirty) = self
             .db(move |cn| {
                 let existing = match files::stat(cn, chat, user, &probe) {
                     Ok(file) => Some(file),
@@ -298,26 +297,27 @@ impl russh_sftp::server::Handler for DogFs {
                 match existing {
                     Some(file) if file.is_dir() => Err(files::FileError::NotAFile(file.name)),
                     Some(_) if exclude => Err(files::FileError::FileAlreadyExists(probe)),
-                    // Truncating discards the old content, so don't fetch it.
-                    Some(_) if truncate => Ok((Vec::new(), true, true)),
+                    // Creating and truncating both take effect now, not at
+                    // close: a client may stat the path straight after opening
+                    // it, and sshfs does exactly that before writing a byte.
+                    Some(_) if truncate => {
+                        files::write(cn, chat, user, &probe, b"")?;
+                        Ok((Vec::new(), false))
+                    }
                     Some(file) => {
                         if !file.can_read(cn, user)? {
                             return Err(files::FileError::NotEnoughPermissions(file.name));
                         }
-                        Ok((file.read(cn)?, false, true))
+                        Ok((file.read(cn)?, false))
                     }
-                    // A new file must exist by the time `close` runs, even if
-                    // nothing is ever written to it.
-                    None if create => Ok((Vec::new(), true, false)),
+                    None if create => {
+                        files::write(cn, chat, user, &probe, b"")?;
+                        Ok((Vec::new(), false))
+                    }
                     None => Err(files::FileError::FileNotFound(probe)),
                 }
             })
             .await?;
-
-        if !writing && !existed {
-            // A read-only open may not conjure a file into existence.
-            return Err(StatusCode::NoSuchFile);
-        }
 
         let handle = self.fresh_handle();
         self.handles

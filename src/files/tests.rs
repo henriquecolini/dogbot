@@ -235,3 +235,38 @@ fn chown_rejects_a_user_who_is_not_in_the_chat() {
         Err(FileError::InvalidArguments)
     ));
 }
+
+#[test]
+fn rename_over_a_file_keeps_the_destination_permissions() {
+    db_test!(cn, chat);
+    // Editors save by writing a temp file and renaming it over the target. The
+    // temp file has default permissions, so taking the source's would strip
+    // the execute bit that main.dog needs to run.
+    write(cn, chat, OWNER, "main.dog", b"old").unwrap();
+    let clause: Clause = "u+x".parse().unwrap();
+    set_permission(cn, chat, OWNER, "main.dog", clause).unwrap();
+    assert!(stat(cn, chat, OWNER, "main.dog").unwrap().user_execute);
+
+    write(cn, chat, OWNER, ".main.dog.tmp", b"new").unwrap();
+    assert!(!stat(cn, chat, OWNER, ".main.dog.tmp").unwrap().user_execute);
+
+    rename(cn, chat, OWNER, ".main.dog.tmp", "main.dog").unwrap();
+
+    let saved = stat(cn, chat, OWNER, "main.dog").unwrap();
+    assert!(saved.user_execute, "an editor save stripped the execute bit");
+    assert_eq!(read(cn, chat, OWNER, "main.dog").unwrap().1, b"new");
+}
+
+#[test]
+fn a_plain_rename_keeps_its_own_permissions() {
+    db_test!(cn, chat);
+    // With no file at the destination there is nothing to inherit, so the
+    // moved file keeps what it had.
+    write(cn, chat, OWNER, "a.dog", b"x").unwrap();
+    let clause: Clause = "u+x".parse().unwrap();
+    set_permission(cn, chat, OWNER, "a.dog", clause).unwrap();
+
+    rename(cn, chat, OWNER, "a.dog", "b.dog").unwrap();
+
+    assert!(stat(cn, chat, OWNER, "b.dog").unwrap().user_execute);
+}

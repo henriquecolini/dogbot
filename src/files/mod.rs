@@ -279,6 +279,12 @@ pub fn rename(
         }
 
         let existing = to_trav.into_file();
+        // Overwriting a regular file is how atomic saves land. Unlike `mv`, the
+        // destination's permissions and owner are kept rather than the
+        // source's: an editor writes a fresh temp file with default
+        // permissions, and taking those would silently strip the execute bit
+        // from main.dog on every save.
+        let mut inherited = None;
         if let Some(existing) = existing {
             if existing.id == file.id {
                 return Ok(file);
@@ -286,12 +292,27 @@ pub fn rename(
             if existing.is_dir() {
                 return Err(FileError::FileAlreadyExists(new_name));
             }
-            // Overwriting a regular file is how atomic saves land.
+            inherited = Some(existing.clone());
             File::delete(cn, existing.id)?;
         }
 
         match File::set_parent_and_name(cn, file.id, new_parent_id, &new_name) {
-            Ok(file) => Ok(file),
+            Ok(moved) => {
+                if let Some(old) = inherited {
+                    File::set_user_read(cn, moved.id, old.user_read)?;
+                    File::set_user_write(cn, moved.id, old.user_write)?;
+                    File::set_user_execute(cn, moved.id, old.user_execute)?;
+                    File::set_group_read(cn, moved.id, old.group_read)?;
+                    File::set_group_write(cn, moved.id, old.group_write)?;
+                    File::set_group_execute(cn, moved.id, old.group_execute)?;
+                    File::set_others_read(cn, moved.id, old.others_read)?;
+                    File::set_others_write(cn, moved.id, old.others_write)?;
+                    File::set_others_execute(cn, moved.id, old.others_execute)?;
+                    File::set_owner(cn, moved.id, old.owner_id.map(|id| UserId(id as u64)))?;
+                    return Ok(File::get(cn, moved.id)?);
+                }
+                Ok(moved)
+            }
             Err(diesel::result::Error::DatabaseError(
                 diesel::result::DatabaseErrorKind::UniqueViolation,
                 _,

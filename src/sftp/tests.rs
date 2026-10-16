@@ -30,7 +30,10 @@ impl russh::client::Handler for AcceptAnyServer {
 async fn harness() -> Option<(u16, String, russh::keys::PrivateKey)> {
     let url = std::env::var("TEST_DATABASE_URL").ok()?;
 
+    // Each test builds its own pool, so keep them small: the default of 10
+    // times the number of parallel tests exhausts Postgres's connection limit.
     let pool: PgPool = diesel::r2d2::Pool::builder()
+        .max_size(2)
         .build(diesel::r2d2::ConnectionManager::new(url))
         .expect("pool");
 
@@ -70,25 +73,17 @@ async fn harness() -> Option<(u16, String, russh::keys::PrivateKey)> {
         .unwrap();
     }
 
-    // Bind port 0 to let the OS pick a free one, then hand the listener over.
+    // Bind port 0 to let the OS pick a free one and hand the live listener
+    // straight to the server. Dropping it first and re-binding by number would
+    // let a parallel test steal the port in between.
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
-    drop(listener);
 
-    let bind = format!("127.0.0.1:{port}");
     tokio::spawn(async move {
-        if let Err(err) = super::run(pool, bind).await {
+        if let Err(err) = super::run_on_listener(pool, listener).await {
             eprintln!("sftp server error: {err}");
         }
     });
-
-    // Give the listener a moment to come up.
-    for _ in 0..50 {
-        if tokio::net::TcpStream::connect(("127.0.0.1", port)).await.is_ok() {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-    }
 
     Some((port, alias, key))
 }
@@ -357,6 +352,8 @@ async fn manual_server() {
     let pool: PgPool = diesel::r2d2::Pool::builder()
         .build(diesel::r2d2::ConnectionManager::new(url))
         .expect("pool");
+    // Unlike `harness`, this may run against a database nothing else touched.
+    crate::run_migrations(&mut pool.get().expect("connection"));
     eprintln!("serving on 127.0.0.1:52222 (ctrl-c to stop)");
     super::run(pool, "127.0.0.1:52222".to_string()).await.unwrap();
 }
