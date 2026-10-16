@@ -10,8 +10,11 @@ pub mod download;
 pub mod help;
 pub mod hostname;
 pub mod id;
+pub mod key;
 pub mod ls;
 pub mod mkdir;
+pub mod mv;
+pub mod mount;
 pub mod read;
 pub mod rm;
 pub mod upload;
@@ -24,6 +27,9 @@ use download::DownloadCommand;
 use hostname::HostnameCommand;
 use ls::LsCommand;
 use mkdir::MkdirCommand;
+use mv::MvCommand;
+use key::KeyCommand;
+use mount::MountCommand;
 use read::ReadCommand;
 use rm::RmCommand;
 use upload::UploadCommand;
@@ -52,12 +58,18 @@ pub enum Command {
     Read(ReadCommand),
     #[command(description = "deletes a file")]
     Rm(RmCommand),
+    #[command(description = "moves or renames a file or directory")]
+    Mv(MvCommand),
     #[command(description = "changes the permissions of a file or directory")]
     Chmod(ChmodCommand),
     #[command(description = "changes the owner of a file")]
     Chown(ChownCommand),
     #[command(description = "shows current user and chat IDs")]
     Id,
+    #[command(description = "manages your SSH keys for filesystem access")]
+    Key(KeyCommand),
+    #[command(description = "shows how to mount this chat's filesystem")]
+    Mount(MountCommand),
     #[command(description = "uploads data to a file, creating it if it doesn't exist")]
     Upload(UploadCommand),
     #[command(description = "downloads a file")]

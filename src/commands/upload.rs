@@ -39,7 +39,7 @@ pub async fn handle(
     ) {
         Ok(_) => {}
         Err(err) => {
-            bot.send_code(chat_id, format!("write: {}", err)).await?;
+            bot.send_code(chat_id, format!("upload: {}", err)).await?;
         }
     }
     Ok(())

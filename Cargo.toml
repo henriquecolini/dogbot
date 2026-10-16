@@ -15,9 +15,14 @@ time = { version = "0.3.47", features = ["formatting"] }
 thiserror = "2.0.18"
 r2d2 = "0.8.10"
 uuid = "1.23.0"
-dog3 = { git = "https://github.com/henriquecolini/dog3.git" }
 diesel_migrations = "2.3.1"
-clap = "4.6.1"
-shlex = { git = "https://github.com/henriquecolini/rust-shlex.git" }
+clap = { version = "4.6.1", features = ["derive"] }
+# Fork, for `Shlex::into_inner()` which /write needs to take the raw remainder.
+shlex = { git = "https://github.com/henriquecolini/rust-shlex.git", rev = "e9999e86edc57dcd85608a5a4ce28f697253a7d2" }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
+russh = "0.64"
+russh-sftp = "3.0"
+rand = "0.10"
+dog4 = { git = "https://github.com/henriquecolini/dog4.git", rev = "794aec2d7350f2b62409ebe45aedf33be6bca98b", version = "0.1.0", default-features = false, features = ["net"] }
+include_dir = "0.7"

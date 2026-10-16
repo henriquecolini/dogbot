@@ -24,7 +24,7 @@ pub async fn handle(
 			bot.send_document(chat_id, InputFile::memory(content).file_name(name)).await?;
 		}
 		Err(err) => {
-			bot.send_code(chat_id, format!("read: {}", err))
+			bot.send_code(chat_id, format!("download: {}", err))
 				.await?;
 		}
 	}

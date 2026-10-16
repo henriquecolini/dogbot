@@ -1,0 +1,48 @@
+use crate::prelude::*;
+use teloxide::prelude::*;
+
+#[derive(clap::Parser, Clone, Debug, PartialEq)]
+pub struct MountCommand {}
+
+pub async fn handle(
+    bot: Bot,
+    pool: PgPool,
+    Context {
+        chat_id,
+        user_id,
+        connected_chat_id,
+        ..
+    }: Context,
+    _: MountCommand,
+) -> BotResult<()> {
+    let mut cn = pool.get()?;
+
+    // Prefer the alias: a username beginning with `-` is unusable with ssh.
+    let chat = model::Chat::find(&mut cn, ChatAddress::Id(connected_chat_id))?;
+    let username = match chat.as_ref().and_then(|c| c.alias.as_deref()) {
+        Some(alias) => alias.to_string(),
+        None => format!("chat{}", connected_chat_id.0),
+    };
+
+    let host = std::env::var("SFTP_HOST").unwrap_or_else(|_| "localhost".to_string());
+    let port = std::env::var("SFTP_PORT").unwrap_or_else(|_| "2222".to_string());
+
+    let keys = model::SshKey::list(&mut cn, user_id)?;
+    let mut reply = String::new();
+
+    if keys.is_empty() {
+        reply.push_str("No SSH key registered yet. Add one first:\n\n");
+        reply.push_str("  /key add ssh-ed25519 AAAA... you@host\n\n");
+    }
+
+    reply.push_str(&format!(
+        "mkdir -p ~/mnt/dogbot\nsshfs -p {port} {username}@{host}:/ ~/mnt/dogbot\n"
+    ));
+
+    if chat.as_ref().and_then(|c| c.alias.as_deref()).is_none() {
+        reply.push_str("\nTip: set a hostname with /hostname <name> for a friendlier mount.\n");
+    }
+
+    bot.send_code(chat_id, reply).await?;
+    Ok(())
+}

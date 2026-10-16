@@ -1,0 +1,30 @@
+// dog3 compatibility shims.
+//
+// dog4 dropped the `j*` JSON family in favour of real maps and arrays. These
+// wrappers keep old scripts working while they are ported; prefer the native
+// forms in new code.
+
+// `jstr_parse` became `json.parse`.
+pub fn jstr_parse (text: str) {
+    put { json.parse $text }
+}
+
+// `jget` indexed arrays and objects alike.
+pub fn jget (object, key) {
+    put $object[$key]
+}
+
+// `jkeys` returned a JSON array of an object's keys.
+pub fn jkeys (object: map) {
+    put { keys $object }
+}
+
+// `jlen` counted members.
+pub fn jlen (object) {
+    put { len $object }
+}
+
+// dog3's `panic` is `fail`.
+pub fn panic (%message) {
+    fail $%message
+}

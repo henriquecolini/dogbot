@@ -1,12 +1,16 @@
 pub mod path;
 pub mod perm;
 
+#[cfg(test)]
+mod tests;
+
 use crate::prelude::*;
 use diesel::PgConnection;
 use model::File;
 use path::*;
 use perm::*;
 use thiserror::Error;
+use uuid::Uuid;
 
 #[derive(Debug, Error)]
 pub enum FileError {
@@ -217,6 +221,160 @@ pub fn list(
         }
 
         Ok(children)
+    })
+}
+
+/// Metadata for a single path, without reading its content.
+pub fn stat(
+    cn: &mut PgConnection,
+    chat_id: ChatId,
+    user_id: UserId,
+    path: &str,
+) -> Result<File, FileError> {
+    cn.transaction(|cn| {
+        let path = Path::parse(path, chat_id);
+        Ok(path.traverse(cn, user_id)?.required()?.into_file())
+    })
+}
+
+/// Moves or renames a file or directory. Requires write on both the source and
+/// the destination parent directory.
+///
+/// Editors save atomically by writing a temporary file and renaming it over the
+/// target, so this is on the hot path for any mounted filesystem.
+pub fn rename(
+    cn: &mut PgConnection,
+    chat_id: ChatId,
+    user_id: UserId,
+    from: &str,
+    to: &str,
+) -> Result<File, FileError> {
+    cn.transaction(|cn| {
+        let from_path = Path::parse(from, chat_id);
+        let to_path = Path::parse(to, chat_id);
+
+        let from_trav = from_path.traverse(cn, user_id)?.required()?;
+        if !from_trav.parent().can_write(cn, user_id)? {
+            return Err(FileError::NotEnoughPermissions(from_trav.into_parent().name));
+        }
+        let (from_parent, file) = from_trav.into_parent_and_file();
+
+        // A chat root has parent_id == id; moving it would corrupt the tree.
+        if file.id == from_parent.id {
+            return Err(FileError::InvalidArguments);
+        }
+
+        let to_trav = to_path.traverse(cn, user_id)?;
+        let new_name = validate_name(to_trav.file_name())?.to_string();
+        let new_parent_id = to_trav.parent().id;
+
+        if !to_trav.parent().can_write(cn, user_id)? {
+            return Err(FileError::NotEnoughPermissions(to_trav.into_parent().name));
+        }
+
+        // Renaming a directory into itself or one of its own descendants would
+        // detach that subtree from the root.
+        if file.is_dir() && is_same_or_descendant(cn, new_parent_id, file.id)? {
+            return Err(FileError::InvalidArguments);
+        }
+
+        let existing = to_trav.into_file();
+        if let Some(existing) = existing {
+            if existing.id == file.id {
+                return Ok(file);
+            }
+            if existing.is_dir() {
+                return Err(FileError::FileAlreadyExists(new_name));
+            }
+            // Overwriting a regular file is how atomic saves land.
+            File::delete(cn, existing.id)?;
+        }
+
+        match File::set_parent_and_name(cn, file.id, new_parent_id, &new_name) {
+            Ok(file) => Ok(file),
+            Err(diesel::result::Error::DatabaseError(
+                diesel::result::DatabaseErrorKind::UniqueViolation,
+                _,
+            )) => Err(FileError::FileAlreadyExists(new_name)),
+            Err(err) => Err(err.into()),
+        }
+    })
+}
+
+/// Whether `candidate` is `ancestor` itself or sits underneath it.
+fn is_same_or_descendant(
+    cn: &mut PgConnection,
+    candidate: Uuid,
+    ancestor: Uuid,
+) -> Result<bool, FileError> {
+    let mut current = candidate;
+    loop {
+        if current == ancestor {
+            return Ok(true);
+        }
+        let file = File::get(cn, current)?;
+        // The chat root points at itself, so this terminates.
+        if file.parent_id == current {
+            return Ok(false);
+        }
+        current = file.parent_id;
+    }
+}
+
+/// Applies a full Unix permission mode (the low 9 bits of `mode`) at once.
+///
+/// `set_permission` takes a symbolic clause, which can only describe one set of
+/// flags; SFTP's `setstat` hands over a whole mode, so this sets all three
+/// classes directly. Like `chmod`, only the owner may do it.
+pub fn set_mode(
+    cn: &mut PgConnection,
+    chat_id: ChatId,
+    user_id: UserId,
+    path: &str,
+    mode: u32,
+) -> Result<(), FileError> {
+    cn.transaction(|cn| {
+        let path = Path::parse(path, chat_id);
+        let file = path.traverse(cn, user_id)?.required()?.into_file();
+
+        if file.owner_id != Some(user_id.0 as i64) {
+            return Err(FileError::NotEnoughPermissions(file.name));
+        }
+
+        File::set_user_read(cn, file.id, mode & 0o400 != 0)?;
+        File::set_user_write(cn, file.id, mode & 0o200 != 0)?;
+        File::set_user_execute(cn, file.id, mode & 0o100 != 0)?;
+        File::set_group_read(cn, file.id, mode & 0o040 != 0)?;
+        File::set_group_write(cn, file.id, mode & 0o020 != 0)?;
+        File::set_group_execute(cn, file.id, mode & 0o010 != 0)?;
+        File::set_others_read(cn, file.id, mode & 0o004 != 0)?;
+        File::set_others_write(cn, file.id, mode & 0o002 != 0)?;
+        File::set_others_execute(cn, file.id, mode & 0o001 != 0)?;
+        Ok(())
+    })
+}
+
+/// Changes a file's owner. Only the current owner may give a file away.
+pub fn set_owner(
+    cn: &mut PgConnection,
+    chat_id: ChatId,
+    user_id: UserId,
+    path: &str,
+    new_owner: UserId,
+) -> Result<(), FileError> {
+    cn.transaction(|cn| {
+        let path = Path::parse(path, chat_id);
+        let file = path.traverse(cn, user_id)?.required()?.into_file();
+
+        if file.owner_id != Some(user_id.0 as i64) {
+            return Err(FileError::NotEnoughPermissions(file.name));
+        }
+        if !model::UserInChat::exists(cn, new_owner, ChatId(file.chat_id))? {
+            return Err(FileError::InvalidArguments);
+        }
+
+        File::set_owner(cn, file.id, Some(new_owner))?;
+        Ok(())
     })
 }
 

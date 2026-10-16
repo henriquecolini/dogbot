@@ -45,6 +45,25 @@ diesel::table! {
 }
 
 diesel::table! {
+    settings (key) {
+        key -> Text,
+        value -> Bytea,
+        created_at -> Timestamptz,
+    }
+}
+
+diesel::table! {
+    ssh_keys (id) {
+        id -> Uuid,
+        user_id -> Int8,
+        fingerprint -> Text,
+        public_key -> Text,
+        label -> Nullable<Text>,
+        created_at -> Timestamptz,
+    }
+}
+
+diesel::table! {
     users (id) {
         id -> Int8,
         first_name -> Text,
@@ -67,6 +86,15 @@ diesel::table! {
 diesel::joinable!(files -> users (owner_id));
 diesel::joinable!(messages -> chats (chat_id));
 diesel::joinable!(messages -> users (user_id));
+diesel::joinable!(ssh_keys -> users (user_id));
 diesel::joinable!(users_in_chats -> chats (chat_id));
 
-diesel::allow_tables_to_appear_in_same_query!(chats, files, messages, users, users_in_chats,);
+diesel::allow_tables_to_appear_in_same_query!(
+    chats,
+    files,
+    messages,
+    settings,
+    ssh_keys,
+    users,
+    users_in_chats,
+);

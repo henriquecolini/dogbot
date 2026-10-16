@@ -1,0 +1,32 @@
+// Small text helpers that most chat scripts end up rewriting.
+//
+// Two dog4 habits worth copying here: a bare `if` discards its value, so a
+// function returning one wraps it in parentheses; and `{ … }` inside a double
+// quoted string is literal text, not a substitution, so results are computed
+// into variables first.
+
+// Shortens `text` to at most `max` characters, adding an ellipsis when cut.
+pub fn truncate (text: str, max: num) {
+    put (if ({ strlen $text } <= $max) {
+        put $text
+    } else {
+        head = { join { first { chars $text } ($max - 1) } "" };
+        put "$head…"
+    })
+}
+
+// Joins `items` with commas, but puts `conj` before the final element:
+// `oxford [a b c] and` gives "a, b and c".
+//
+// The parameter is not called `last`: variables and functions share one
+// namespace in dog4, so that would shadow the `last` builtin used below.
+pub fn oxford (items: arr, conj: str) {
+    n = { len $items };
+    put (if ($n <= 1) {
+        put { join $items "" }
+    } else {
+        head = { join { first $items ($n - 1) } ", " };
+        tail = { join { last $items 1 } "" };
+        put "$head $conj $tail"
+    })
+}

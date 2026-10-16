@@ -2,6 +2,23 @@ use crate::prelude::*;
 use teloxide::payloads::{SendMessage, SendMessageSetters};
 use teloxide::requests::JsonRequest;
 
+/// Telegram rejects messages longer than 4096 UTF-16 units. Text is cut before
+/// it is escaped or wrapped, so an entity can never be split in half; the
+/// limits leave room for that expansion.
+const MAX_RAW_CHARS: usize = 3900;
+const MAX_CODE_CHARS: usize = 3000;
+const TRUNCATION_MARK: &str = "\n… (truncated)";
+
+/// Shortens `text` to `max` characters, marking it when something was cut.
+fn truncate(text: String, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text;
+    }
+    let mut out: String = text.chars().take(max).collect();
+    out.push_str(TRUNCATION_MARK);
+    out
+}
+
 pub enum Formatted {
     Raw(String),
     Code(String),
@@ -54,10 +71,14 @@ impl SendFormatted for Bot {
         text: Formatted,
     ) -> JsonRequest<SendMessage> {
         match text {
-            Formatted::Raw(text) => self.send_message(chat_id, text),
+            Formatted::Raw(text) => self.send_message(chat_id, truncate(text, MAX_RAW_CHARS)),
             Formatted::Code(text) => self
-                .send_message(chat_id, format!("<code>{}</code>", escape_html(text)))
+                .send_message(
+                    chat_id,
+                    format!("<code>{}</code>", escape_html(truncate(text, MAX_CODE_CHARS))),
+                )
                 .parse_mode(ParseMode::Html),
+            // Already-built HTML is left alone: cutting it could split a tag.
             Formatted::Html(text) => self.send_message(chat_id, text).parse_mode(ParseMode::Html),
         }
     }

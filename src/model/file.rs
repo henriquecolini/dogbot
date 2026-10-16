@@ -5,6 +5,15 @@ use teloxide::prelude::*;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
+diesel::define_sql_function! {
+    /// Postgres `octet_length`, so listings can report sizes without
+    /// pulling every blob out of the database.
+    #[sql_name = "octet_length"]
+    fn octet_length(
+        x: diesel::sql_types::Nullable<diesel::sql_types::Binary>,
+    ) -> diesel::sql_types::Nullable<diesel::sql_types::Integer>;
+}
+
 #[derive(Selectable, Queryable, Debug, Clone)]
 #[diesel(table_name = crate::schema::files)]
 #[diesel(check_for_backend(diesel::pg::Pg))]
@@ -241,5 +250,49 @@ impl File {
             .filter(files::id.eq(self.id))
             .first(cn)
             .map(|opt: Option<Vec<u8>>| opt.unwrap_or_default())
+    }
+
+    /// Moves and/or renames a file. Used by `rename`, which SFTP clients rely on
+    /// for atomic saves.
+    pub fn set_parent_and_name(
+        cn: &mut PgConnection,
+        id: Uuid,
+        parent_id: Uuid,
+        name: &str,
+    ) -> QueryResult<File> {
+        update(files::files.filter(files::id.eq(id)))
+            .set((files::parent_id.eq(parent_id), files::name.eq(name)))
+            .returning(File::as_select())
+            .get_result(cn)
+    }
+    pub fn set_owner(cn: &mut PgConnection, id: Uuid, owner_id: Option<UserId>) -> QueryResult<usize> {
+        update(files::files.filter(files::id.eq(id)))
+            .set(files::owner_id.eq(owner_id.map(|id| id.0 as i64)))
+            .execute(cn)
+    }
+    /// Byte length of the content, without transferring it. Directories report 0.
+    pub fn size(cn: &mut PgConnection, id: Uuid) -> QueryResult<i64> {
+        files::files
+            .select(octet_length(files::content))
+            .filter(files::id.eq(id))
+            .first(cn)
+            .map(|opt: Option<i32>| opt.unwrap_or(0) as i64)
+    }
+    /// Like `list_children`, but pairs each entry with its size in one query.
+    pub fn list_children_with_size(
+        cn: &mut PgConnection,
+        parent_id: Uuid,
+    ) -> QueryResult<Vec<(File, i64)>> {
+        files::files
+            .select((File::as_select(), octet_length(files::content)))
+            .filter(files::parent_id.eq(parent_id))
+            .filter(files::parent_id.ne(files::id))
+            .order(files::name)
+            .load(cn)
+            .map(|rows: Vec<(File, Option<i32>)>| {
+                rows.into_iter()
+                    .map(|(f, n)| (f, n.unwrap_or(0) as i64))
+                    .collect()
+            })
     }
 }

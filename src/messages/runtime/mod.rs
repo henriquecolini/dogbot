@@ -1,284 +1,155 @@
+//! The `bot` native module: everything a script can do beyond pure computation.
+//!
+//! Scripts reach these with `use read, write from mod bot;`. Unlike dog3's
+//! string-plus-status-code convention, failures raise a catchable dog4 error
+//! and results are real values — `ls` returns an array, `history` an array of
+//! maps.
+
 use crate::prelude::*;
-use dog3::{
-    builtin, builtin_state,
-    runtime::{
-        ExecutionError, Runtime, functions::FunctionLibrary, output::Output, scope::ScopeStack,
-    },
-};
+use dog4::{Error, Library, Map, Value};
 use log::*;
 use teloxide::prelude::*;
 
 #[derive(Clone)]
-struct State {
-    pool: PgPool,
-    chat_id: ChatId,
-    user_id: UserId,
+pub struct State {
+    pub pool: PgPool,
+    pub chat_id: ChatId,
+    pub user_id: UserId,
 }
 
-async fn read(
-    State {
-        pool,
-        chat_id,
-        user_id,
-    }: State,
-    _: &FunctionLibrary,
-    _: &mut ScopeStack<'_>,
-    args: Vec<Output>,
-) -> Result<Output, ExecutionError> {
-    let path = match args.as_slice() {
-        [path] => path.value(),
-        _ => return Err(ExecutionError::InternalError),
-    };
-    let mut cn = match pool.get() {
-        Ok(cn) => cn,
-        Err(err) => {
-            error!("Error running `read` builtin: {err}");
-            return Err(ExecutionError::InternalError);
-        }
-    };
-    match crate::files::read(&mut cn, chat_id, user_id, path) {
-        Ok((_, file)) => {
-            let string = String::from_utf8_lossy(&file).into_owned();
-            Ok(Output::new_truthy_with(string.into()))
-        }
-        Err(files::FileError::QueryError(err)) => {
-            error!("Error running `read` builtin: {err}");
-            Err(ExecutionError::InternalError)
-        }
-        Err(err) => Ok(Output::new_falsy_with(err.to_string().into())),
+impl State {
+    /// Borrows a connection, turning pool exhaustion into a script-visible error.
+    fn connect(&self) -> Result<diesel::r2d2::PooledConnection<
+        diesel::r2d2::ConnectionManager<diesel::PgConnection>,
+    >, Error> {
+        self.pool.get().map_err(|err| {
+            error!("bot module: no database connection: {err}");
+            Error::value_error("the database is unavailable")
+        })
     }
 }
 
-async fn write(
-    State {
-        pool,
-        chat_id,
-        user_id,
-    }: State,
-    _: &FunctionLibrary,
-    _: &mut ScopeStack<'_>,
-    args: Vec<Output>,
-) -> Result<Output, ExecutionError> {
-    let (path, content) = match args.as_slice() {
-        [path, content] => (path.value(), content.value().as_bytes()),
-        _ => return Err(ExecutionError::InternalError),
-    };
-    let mut cn = match pool.get() {
-        Ok(cn) => cn,
-        Err(err) => {
-            error!("Error running `write` builtin: {err}");
-            return Err(ExecutionError::InternalError);
+/// Turns a filesystem error into a dog4 error. Database faults are logged and
+/// reported generically; everything else is the user's own mistake.
+fn fs_error(err: files::FileError) -> Error {
+    match err {
+        files::FileError::QueryError(err) => {
+            error!("bot module: database error: {err}");
+            Error::value_error("the database is unavailable")
         }
-    };
-    match crate::files::write(&mut cn, chat_id, user_id, path, content) {
-        Ok(_) => Ok(Output::new_truthy()),
-        Err(files::FileError::QueryError(err)) => {
-            error!("Error running `write` builtin: {err}");
-            Err(ExecutionError::InternalError)
-        }
-        Err(err) => Ok(Output::new_falsy_with(err.to_string().into())),
+        err => Error::value_error(err.to_string()),
     }
 }
 
-async fn ls(
-    State {
-        pool,
-        chat_id,
-        user_id,
-        ..
-    }: State,
-    _: &FunctionLibrary,
-    _: &mut ScopeStack<'_>,
-    args: Vec<Output>,
-) -> Result<Output, ExecutionError> {
-    let (path, include_files, include_dirs) = match args.as_slice() {
-        [path] => (path.value(), true, true),
-        [path, include_files] => (path.value(), include_files.is_truthy(), true),
-        [path, include_files, include_dirs] => (
-            path.value(),
-            include_files.is_truthy(),
-            include_dirs.is_truthy(),
-        ),
-        _ => return Err(ExecutionError::InternalError),
-    };
-    let mut cn = match pool.get() {
-        Ok(cn) => cn,
-        Err(err) => {
-            error!("Error running `ls` builtin: {err}");
-            return Err(ExecutionError::InternalError);
-        }
-    };
-    match files::list(&mut cn, chat_id, user_id, path, false) {
-        Ok(list) => Ok(Output::new_truthy_with(
-            list.into_iter()
+pub fn build(state: State) -> Value {
+    let mut lib = Library::new();
+
+    let s = state.clone();
+    lib.def("read", "path: str", move |vm, args| {
+        let mut cn = s.connect()?;
+        let path = args[0].to_string();
+        let (_, bytes) = files::read(&mut cn, s.chat_id, s.user_id, &path).map_err(fs_error)?;
+        vm.meter().check_now()?;
+        Ok(Value::str(String::from_utf8_lossy(&bytes).as_ref()))
+    });
+
+    let s = state.clone();
+    lib.def("write", "path: str, content: str", move |vm, args| {
+        let mut cn = s.connect()?;
+        let (path, content) = (args[0].to_string(), args[1].to_string());
+        files::write(&mut cn, s.chat_id, s.user_id, &path, content.as_bytes())
+            .map_err(fs_error)?;
+        vm.meter().check_now()?;
+        Ok(Value::Null)
+    });
+
+    let s = state.clone();
+    lib.def("exists", "path: str", move |vm, args| {
+        let mut cn = s.connect()?;
+        let path = args[0].to_string();
+        let found = match files::stat(&mut cn, s.chat_id, s.user_id, &path) {
+            Ok(_) => true,
+            Err(files::FileError::FileNotFound(_)) => false,
+            Err(err) => return Err(fs_error(err)),
+        };
+        vm.meter().check_now()?;
+        Ok(Value::Bool(found))
+    });
+
+    // dog4 arity is fixed (`t?` is a type, not an optional slot), so the
+    // variants are registered as overloads.
+    for arity in 1..=3 {
+        let s = state.clone();
+        let params = match arity {
+            1 => "path: str",
+            2 => "path: str, include_files: bool",
+            _ => "path: str, include_files: bool, include_dirs: bool",
+        };
+        lib.def("ls", params, move |vm, args| {
+            let mut cn = s.connect()?;
+            let path = args[0].to_string();
+            let include_files = args.get(1).is_none_or(|v| v.truthy());
+            let include_dirs = args.get(2).is_none_or(|v| v.truthy());
+
+            let listing =
+                files::list(&mut cn, s.chat_id, s.user_id, &path, false).map_err(fs_error)?;
+            vm.meter().check_now()?;
+
+            let names = listing
+                .into_iter()
                 .filter(|f| (include_files && f.is_file()) || (include_dirs && f.is_dir()))
-                .map(|f| f.name)
-                .collect::<Vec<String>>()
-                .join("\n")
-                .into(),
-        )),
-        Err(files::FileError::QueryError(err)) => {
-            error!("Error running `ls` builtin: {err}");
-            Err(ExecutionError::InternalError)
-        }
-        Err(err) => Ok(Output::new_falsy_with(err.to_string().into())),
+                .map(|f| Value::str(&f.name))
+                .collect::<Vec<_>>();
+            Ok(Value::arr(names))
+        });
     }
-}
 
-async fn version(
-    _: &FunctionLibrary,
-    _: &mut ScopeStack<'_>,
-    args: Vec<Output>,
-) -> Result<Output, ExecutionError> {
-    match args.as_slice() {
-        [] => {}
-        _ => return Err(ExecutionError::InternalError),
-    };
-    Ok(Output::new_truthy_with(
-        option_env!("APP_VERSION").unwrap_or("dev").into(),
-    ))
-}
+    for arity in 0..=3 {
+        let s = state.clone();
+        let params = match arity {
+            0 => "",
+            1 => "count: num",
+            2 => "count: num, offset: num",
+            _ => "count: num, offset: num, with_bot: bool",
+        };
+        lib.def("history", params, move |vm, args| {
+            let mut cn = s.connect()?;
+            let count = args.first().and_then(|v| v.as_int()).unwrap_or(10);
+            let offset = args.get(1).and_then(|v| v.as_int()).unwrap_or(0);
+            let with_bot = args.get(2).is_some_and(|v| v.truthy());
 
-async fn history(
-    State { pool, chat_id, .. }: State,
-    _: &FunctionLibrary,
-    _: &mut ScopeStack<'_>,
-    args: Vec<Output>,
-) -> Result<Output, ExecutionError> {
-    let (count, offset, with_content, with_users, with_bot) = match args.as_slice() {
-        [] => (Ok(10), Ok(0), true, true, false),
-        [count] => (count.try_into(), Ok(0), true, true, false),
-        [count, offset] => (count.try_into(), offset.try_into(), true, true, false),
-        [count, offset, with_content] => (
-            count.try_into(),
-            offset.try_into(),
-            with_content.is_truthy(),
-            true,
-            false,
-        ),
-        [count, offset, with_content, with_users] => (
-            count.try_into(),
-            offset.try_into(),
-            with_content.is_truthy(),
-            with_users.is_truthy(),
-            false,
-        ),
-        [count, offset, with_content, with_users, with_bot] => (
-            count.try_into(),
-            offset.try_into(),
-            with_content.is_truthy(),
-            with_users.is_truthy(),
-            with_bot.is_truthy(),
-        ),
-        _ => return Err(ExecutionError::InternalError),
-    };
-    let (count, offset) = match (count, offset) {
-        (Ok(count), Ok(offset)) => (count, offset),
-        _ => return Ok(Output::new_falsy()),
-    };
-    let mut cn = match pool.get() {
-        Ok(cn) => cn,
-        Err(err) => {
-            error!("Error running `write` builtin: {err}");
-            return Err(ExecutionError::InternalError);
-        }
-    };
-    match model::Message::list(&mut cn, chat_id, count, offset) {
-        Ok(messages) => {
-            let mut output = vec![];
-            for (message, user) in messages {
-                if !with_bot && user.is_none() {
-                    continue;
-                }
-                let mut line = String::new();
-                if with_users {
-                    if let Some(user) = user {
-                        line += &user.first_name;
-                        if let Some(last_name) = user.last_name {
-                            line += " ";
-                            line += &last_name;
-                        }
-                    } else {
-                        line += "<bot>"
-                    }
-                }
-                if with_users && with_content {
-                    line += ": ";
-                }
-                if with_content {
-                    line += &message.content.replace("\n", " ");
-                }
-                output.push(line);
-            }
-            Ok(Output::new_truthy_with(output.join("\n").into()))
-        }
-        Err(err) => {
-            error!("Error running `history` builtin: {err}");
-            Err(ExecutionError::InternalError)
-        }
+            let messages =
+                model::Message::list(&mut cn, s.chat_id, count, offset).map_err(|err| {
+                    error!("bot module: history failed: {err}");
+                    Error::value_error("the database is unavailable")
+                })?;
+            vm.meter().check_now()?;
+
+            let rows = messages
+                .into_iter()
+                .filter(|(_, user)| with_bot || user.is_some())
+                .map(|(message, user)| {
+                    let name = match &user {
+                        Some(user) => match &user.last_name {
+                            Some(last) => format!("{} {}", user.first_name, last),
+                            None => user.first_name.clone(),
+                        },
+                        None => "<bot>".to_string(),
+                    };
+                    let mut row = Map::default();
+                    row.insert("user".into(), Value::str(&name));
+                    row.insert("content".into(), Value::str(&message.content));
+                    row.insert("is_bot".into(), Value::Bool(user.is_none()));
+                    Value::map(row)
+                })
+                .collect::<Vec<_>>();
+            Ok(Value::arr(rows))
+        });
     }
-}
 
-pub fn register_libraries(
-    pool: PgPool,
-    chat_id: ChatId,
-    user_id: UserId,
-    mut runtime: Runtime,
-) -> Runtime {
-    let state = State {
-        pool,
-        chat_id,
-        user_id,
-    };
-    let _ = runtime.library.merge(builtin::std::build());
-    let _ = runtime.library.merge(builtin::str::build());
-    let _ = runtime.library.merge(builtin::net::build());
-    let _ = runtime.library.merge(builtin::iter::build());
-    let _ = runtime.library.merge(builtin::math::build());
-    let _ = runtime.library.merge(builtin::logic::build());
-    let _ = runtime.library.merge(builtin::json::build());
-    builtin_state!(runtime.library, read, state.clone(), "path");
-    builtin_state!(runtime.library, write, state.clone(), "path", "content");
-    builtin_state!(runtime.library, ls, state.clone(), "path");
-    builtin_state!(runtime.library, ls, state.clone(), "path", "include_files");
-    builtin_state!(
-        runtime.library,
-        ls,
-        state.clone(),
-        "path",
-        "include_files",
-        "include_dirs"
-    );
-    builtin_state!(runtime.library, history, state.clone());
-    builtin_state!(runtime.library, history, state.clone(), "count");
-    builtin_state!(runtime.library, history, state.clone(), "count", "offset");
-    builtin_state!(
-        runtime.library,
-        history,
-        state.clone(),
-        "count",
-        "offset",
-        "with_content"
-    );
-    builtin_state!(
-        runtime.library,
-        history,
-        state.clone(),
-        "count",
-        "offset",
-        "with_content",
-        "with_users"
-    );
-    builtin_state!(
-        runtime.library,
-        history,
-        state.clone(),
-        "count",
-        "offset",
-        "with_content",
-        "with_users",
-        "with_bot"
-    );
-    builtin!(runtime.library, version);
-    runtime
+    lib.def("version", "", |_, _| {
+        Ok(Value::str(option_env!("APP_VERSION").unwrap_or("dev")))
+    });
+
+    lib.into_value()
 }

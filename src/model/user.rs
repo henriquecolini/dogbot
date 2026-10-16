@@ -56,6 +56,14 @@ impl User {
         Self::get(cn, user_id).optional()
     }
 
+    /// Looks a user up by their Telegram @username (without the `@`).
+    pub fn find_by_username(cn: &mut PgConnection, username: &str) -> QueryResult<Option<User>> {
+        Self::query()
+            .filter(users::username.eq(username))
+            .first(cn)
+            .optional()
+    }
+
     pub fn get(cn: &mut PgConnection, user_id: UserId) -> QueryResult<User> {
         Self::query()
             .filter(users::id.eq(user_id.0 as i64))

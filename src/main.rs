@@ -7,6 +7,7 @@ mod model;
 pub mod prelude;
 mod result;
 pub mod schema;
+mod sftp;
 
 use crate::commands::*;
 use crate::formatted::SendFormatted;
@@ -77,6 +78,15 @@ async fn main() {
 
     info!("Starting bot");
 
+    // The SFTP server shares the pool and runs alongside the dispatcher.
+    let sftp_pool = pool.clone();
+    let sftp_bind = std::env::var("SFTP_BIND").unwrap_or_else(|_| "0.0.0.0:2222".to_string());
+    let sftp = tokio::spawn(async move {
+        if let Err(err) = sftp::run(sftp_pool, sftp_bind).await {
+            error!("SFTP server stopped: {err}");
+        }
+    });
+
     let bot = Bot::from_env();
     let handler = Update::filter_message()
         .map(move || pool.clone())
@@ -100,9 +110,12 @@ async fn main() {
                         .branch(case![Command::Write(c)].endpoint(write::handle))
                         .branch(case![Command::Read(c)].endpoint(read::handle))
                         .branch(case![Command::Rm(c)].endpoint(rm::handle))
+                        .branch(case![Command::Mv(c)].endpoint(mv::handle))
                         .branch(case![Command::Chmod(c)].endpoint(chmod::handle))
                         .branch(case![Command::Chown(c)].endpoint(chown::handle))
                         .branch(case![Command::Id].endpoint(id::handle))
+                        .branch(case![Command::Key(c)].endpoint(key::handle))
+                        .branch(case![Command::Mount(c)].endpoint(mount::handle))
                         .branch(case![Command::Upload(c)].endpoint(upload::handle))
                         .branch(case![Command::Download(c)].endpoint(download::handle)),
                 )
@@ -115,6 +128,8 @@ async fn main() {
         )
         .endpoint(default_endpoint);
     Dispatcher::builder(bot, handler).build().dispatch().await;
+
+    sftp.abort();
 }
 
 fn register_message(
