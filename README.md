@@ -117,8 +117,8 @@ use read, write, ls, exists, history, version from mod bot;
 | `version` | the running build |
 | `later path` | runs the script at `path` once this message has been answered |
 | `send text [format]` | sends a message to the chat right now, while the script runs |
-| `post text [format]` | like `send`, but returns the message's id |
-| `edit id text [format]` | rewrites a message `post` returned the id of |
+| `send_id text [format]` | like `send`, but returns the message's id |
+| `edit id text [format]` | rewrites a message `send_id` returned the id of |
 | `sleep seconds` | pauses the script |
 
 `later` is for upkeep nobody should wait on: summarising, reindexing, warming
@@ -130,11 +130,11 @@ at a time, and a deferred script can't queue another.
 ### Sending messages as you go
 
 The script's output is sent as one reply when it finishes. To say something
-earlier, or in several messages, or to show progress, use `send`, `post`,
+earlier, or in several messages, or to show progress, use `send`, `send_id`,
 `edit` and `sleep`:
 
 ```dog
-use send, post, edit, sleep from mod bot;
+use send, send_id, edit, sleep from mod bot;
 
 send "Rolling…";
 sleep 1.5;
@@ -148,13 +148,13 @@ raises. `html` is usually easier. Neither is shortened, so mind the 4096
 character limit; `plain` and `code` are cut for you.
 
 `send` returns nothing, because in dog4 a command's value is part of the reply
-and a stray message id would end up in it. Use `post` when you want the id, to
+and a stray message id would end up in it. Use `send_id` when you want the id, to
 build a progress message:
 
 ```dog
-use post, edit, sleep from mod bot;
+use send_id, edit, sleep from mod bot;
 
-id = { post "Working… 0%" };
+id = { send_id "Working… 0%" };
 for pct in [25 50 75] {
     sleep 1;
     edit $id "Working… $pct%";

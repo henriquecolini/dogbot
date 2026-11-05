@@ -228,9 +228,9 @@ pub fn build(state: State) -> Value {
 
     // Sends a message right away, while the script is still running. Overloaded
     // for the format. `send` returns nothing, because a command's value is
-    // output in dog4 and a stray message id would end up in the reply; `post`
+    // output in dog4 and a stray message id would end up in the reply; `send_id`
     // is the same call returning the id, for a message that will be `edit`ed.
-    for (name, returns_id) in [("send", false), ("post", true)] {
+    for (name, returns_id) in [("send", false), ("send_id", true)] {
         for arity in 1..=2 {
             let s = state.clone();
             let params = if arity == 1 {
@@ -255,7 +255,7 @@ pub fn build(state: State) -> Value {
         }
     }
 
-    // Rewrites a message `post` returned the id of: the way to show progress.
+    // Rewrites a message `send_id` returned the id of: the way to show progress.
     for arity in 2..=3 {
         let s = state.clone();
         let params = if arity == 2 {
@@ -267,7 +267,7 @@ pub fn build(state: State) -> Value {
             let id = args[0]
                 .as_int()
                 .and_then(|id| i32::try_from(id).ok())
-                .ok_or_else(|| Error::value_error("edit needs a message id from post"))?;
+                .ok_or_else(|| Error::value_error("edit needs a message id from send_id"))?;
             let mode = args.get(2).map(|m| m.to_string());
             let text = formatted(&args[1].to_string(), mode.as_deref())?;
             s.courier()?

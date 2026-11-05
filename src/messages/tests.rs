@@ -491,16 +491,16 @@ fn run_sending(source: &str) -> (Result<String, String>, Vec<String>) {
 }
 
 #[test]
-fn send_and_post_deliver_in_each_format_and_only_post_returns_the_id() {
+fn send_and_send_id_deliver_in_each_format_and_only_post_returns_the_id() {
     let (out, log) = run_sending(
-        r#"use send, post from mod bot;
+        r#"use send, send_id from mod bot;
            send "one";
-           a = { post "two" markdown };
+           a = { send_id "two" markdown };
            send "<b>three</b>" html;
            send "four" code;
            put $a"#,
     );
-    // Only `post` returns the id; `send` leaves nothing behind in the reply.
+    // Only `send_id` returns the id; `send` leaves nothing behind in the reply.
     assert_eq!(out.unwrap(), "102");
     assert_eq!(
         log,
@@ -516,8 +516,8 @@ fn send_and_post_deliver_in_each_format_and_only_post_returns_the_id() {
 #[test]
 fn edit_rewrites_a_message_sent_earlier() {
     let (out, log) = run_sending(
-        r#"use post, edit from mod bot;
-           id = { post "working…" };
+        r#"use send_id, edit from mod bot;
+           id = { send_id "working…" };
            edit $id "done" html;
            edit $id "really done";
            put ok"#,
@@ -626,9 +626,9 @@ fn sleep_rejects_nonsense() {
 #[test]
 fn the_readme_progress_example_runs() {
     let (out, log) = run_sending(
-        r#"use post, edit, sleep from mod bot;
+        r#"use send_id, edit, sleep from mod bot;
 
-           id = { post "Working… 0%" };
+           id = { send_id "Working… 0%" };
            for pct in [25 50 75] {
                sleep 0.01;
                edit $id "Working… $pct%";
