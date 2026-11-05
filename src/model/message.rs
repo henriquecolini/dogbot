@@ -36,6 +36,18 @@ impl Message {
             .execute(cn)?;
         Ok(())
     }
+    /// Records that a message was edited, so `history` shows its current text.
+    pub fn update_content(
+        cn: &mut PgConnection,
+        id: MessageId,
+        chat_id: ChatId,
+        content: &str,
+    ) -> QueryResult<()> {
+        update(messages::messages.find((id.0 as i64, chat_id.0)))
+            .set(messages::content.eq(content))
+            .execute(cn)?;
+        Ok(())
+    }
     pub fn list(
         cn: &mut PgConnection,
         chat_id: ChatId,

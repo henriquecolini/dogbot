@@ -1,6 +1,7 @@
 use crate::prelude::*;
-use teloxide::payloads::{SendMessage, SendMessageSetters};
+use teloxide::payloads::{EditMessageText, EditMessageTextSetters, SendMessage, SendMessageSetters};
 use teloxide::requests::JsonRequest;
+use teloxide::types::{MessageId, ParseMode};
 
 /// Telegram rejects messages longer than 4096 UTF-16 units. Text is cut before
 /// it is escaped or wrapped, so an entity can never be split in half; the
@@ -23,6 +24,9 @@ pub enum Formatted {
     Raw(String),
     Code(String),
     Html(String),
+    /// Telegram's MarkdownV2, which is strict: a stray `.` or `-` outside an
+    /// entity must be escaped with `\`, and Telegram refuses the message if not.
+    Markdown(String),
 }
 
 impl Formatted {
@@ -31,6 +35,21 @@ impl Formatted {
             Formatted::Raw(text) => text.is_empty(),
             Formatted::Code(text) => text.is_empty(),
             Formatted::Html(text) => text.is_empty(),
+            Formatted::Markdown(text) => text.is_empty(),
+        }
+    }
+
+    /// The text to put on the wire and how Telegram should parse it.
+    fn render(self) -> (String, Option<ParseMode>) {
+        match self {
+            Formatted::Raw(text) => (truncate(text, MAX_RAW_CHARS), None),
+            Formatted::Code(text) => (
+                format!("<code>{}</code>", escape_html(truncate(text, MAX_CODE_CHARS))),
+                Some(ParseMode::Html),
+            ),
+            // Already-built markup is left alone: cutting it could split a tag.
+            Formatted::Html(text) => (text, Some(ParseMode::Html)),
+            Formatted::Markdown(text) => (text, Some(ParseMode::MarkdownV2)),
         }
     }
 }
@@ -70,16 +89,37 @@ impl SendFormatted for Bot {
         chat_id: C,
         text: Formatted,
     ) -> JsonRequest<SendMessage> {
-        match text {
-            Formatted::Raw(text) => self.send_message(chat_id, truncate(text, MAX_RAW_CHARS)),
-            Formatted::Code(text) => self
-                .send_message(
-                    chat_id,
-                    format!("<code>{}</code>", escape_html(truncate(text, MAX_CODE_CHARS))),
-                )
-                .parse_mode(ParseMode::Html),
-            // Already-built HTML is left alone: cutting it could split a tag.
-            Formatted::Html(text) => self.send_message(chat_id, text).parse_mode(ParseMode::Html),
+        let (text, mode) = text.render();
+        let request = self.send_message(chat_id, text);
+        match mode {
+            Some(mode) => request.parse_mode(mode),
+            None => request,
+        }
+    }
+}
+
+pub trait EditFormatted {
+    /// Replaces the text of a message the bot sent earlier.
+    fn edit_formatted<C: Into<Recipient>>(
+        &self,
+        chat_id: C,
+        message_id: MessageId,
+        text: Formatted,
+    ) -> JsonRequest<EditMessageText>;
+}
+
+impl EditFormatted for Bot {
+    fn edit_formatted<C: Into<Recipient>>(
+        &self,
+        chat_id: C,
+        message_id: MessageId,
+        text: Formatted,
+    ) -> JsonRequest<EditMessageText> {
+        let (text, mode) = text.render();
+        let request = self.edit_message_text(chat_id, message_id, text);
+        match mode {
+            Some(mode) => request.parse_mode(mode),
+            None => request,
         }
     }
 }
@@ -94,6 +134,10 @@ pub fn code(input: impl AsRef<str>) -> Formatted {
 
 pub fn html(input: impl AsRef<str>) -> Formatted {
     Formatted::Html(input.as_ref().to_owned())
+}
+
+pub fn markdown(input: impl AsRef<str>) -> Formatted {
+    Formatted::Markdown(input.as_ref().to_owned())
 }
 
 pub fn escape_html(input: impl AsRef<str>) -> String {
