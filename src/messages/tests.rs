@@ -53,7 +53,7 @@ impl Harness {
                 reply: reply.to_string(),
                 reply_from: reply_from.to_string(),
             },
-            None,
+            Hooks::default(),
         )
     }
 
@@ -72,7 +72,10 @@ impl Harness {
                 reply: String::new(),
                 reply_from: String::new(),
             },
-            Some(later.clone()),
+            Hooks {
+                later: Some(later.clone()),
+                courier: None,
+            },
         );
         (out, later.take())
     }
@@ -268,7 +271,7 @@ fn an_endless_loop_hits_the_time_limit() {
             reply: String::new(),
             reply_from: String::new(),
         },
-        None,
+        Hooks::default(),
     )
     .unwrap_err();
     assert!(
@@ -297,7 +300,7 @@ fn net_is_withheld_when_the_config_says_so() {
             reply: String::new(),
             reply_from: String::new(),
         },
-        None,
+        Hooks::default(),
     )
     .unwrap_err();
     assert!(err.contains("get"), "unexpected error: {err}");
@@ -410,4 +413,237 @@ fn a_deferred_run_cannot_queue_another() {
         .run("use later from mod bot; put (try { later jobs/tidy.dog } catch e { put $e.message })")
         .unwrap();
     assert!(out.contains("deferred"), "unexpected: {out}");
+}
+
+// --- send, edit and sleep ---------------------------------------------------
+//
+// None of these touch the database or Telegram: the courier is a fake and the
+// pool never connects, so they run without `TEST_DATABASE_URL`.
+
+use courier::Courier;
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
+
+#[derive(Default)]
+struct FakeCourier {
+    /// `(id, mode, text)` for every send, and `edit` records under the same id.
+    log: Mutex<Vec<String>>,
+}
+
+fn describe(text: &Formatted) -> String {
+    match text {
+        Formatted::Raw(t) => format!("plain:{t}"),
+        Formatted::Code(t) => format!("code:{t}"),
+        Formatted::Html(t) => format!("html:{t}"),
+        Formatted::Markdown(t) => format!("markdown:{t}"),
+    }
+}
+
+impl Courier for FakeCourier {
+    fn send(&self, text: Formatted, _: Option<Duration>) -> Result<i32, String> {
+        let mut log = self.log.lock().unwrap();
+        log.push(format!("send {}", describe(&text)));
+        Ok(100 + log.len() as i32)
+    }
+    fn edit(&self, id: i32, text: Formatted, _: Option<Duration>) -> Result<(), String> {
+        self.log.lock().unwrap().push(format!("edit {id} {}", describe(&text)));
+        Ok(())
+    }
+}
+
+fn offline_pool() -> PgPool {
+    diesel::r2d2::Pool::builder()
+        .max_size(1)
+        .min_idle(Some(0))
+        .connection_timeout(Duration::from_millis(1))
+        .build_unchecked(diesel::r2d2::ConnectionManager::new("postgres://invalid/invalid"))
+}
+
+fn run_offline(
+    source: &str,
+    config: &Config,
+    courier: Option<Arc<dyn Courier>>,
+) -> Result<String, String> {
+    run_script(
+        offline_pool(),
+        ChatId(-1),
+        UserId(1),
+        source,
+        config,
+        &ScriptContext {
+            message: String::new(),
+            sender: String::new(),
+            reply: String::new(),
+            reply_from: String::new(),
+        },
+        Hooks {
+            later: None,
+            courier,
+        },
+    )
+}
+
+fn run_sending(source: &str) -> (Result<String, String>, Vec<String>) {
+    let courier = Arc::new(FakeCourier::default());
+    let out = run_offline(source, &Config::default(), Some(courier.clone()));
+    let log = courier.log.lock().unwrap().clone();
+    (out, log)
+}
+
+#[test]
+fn send_and_post_deliver_in_each_format_and_only_post_returns_the_id() {
+    let (out, log) = run_sending(
+        r#"use send, post from mod bot;
+           send "one";
+           a = { post "two" markdown };
+           send "<b>three</b>" html;
+           send "four" code;
+           put $a"#,
+    );
+    // Only `post` returns the id; `send` leaves nothing behind in the reply.
+    assert_eq!(out.unwrap(), "102");
+    assert_eq!(
+        log,
+        vec![
+            "send plain:one",
+            "send markdown:two",
+            "send html:<b>three</b>",
+            "send code:four",
+        ]
+    );
+}
+
+#[test]
+fn edit_rewrites_a_message_sent_earlier() {
+    let (out, log) = run_sending(
+        r#"use post, edit from mod bot;
+           id = { post "working…" };
+           edit $id "done" html;
+           edit $id "really done";
+           put ok"#,
+    );
+    assert_eq!(out.unwrap(), "ok");
+    assert_eq!(
+        log,
+        vec![
+            "send plain:working…",
+            "edit 101 html:done",
+            "edit 101 plain:really done",
+        ]
+    );
+}
+
+#[test]
+fn send_refuses_what_telegram_would() {
+    let (out, log) = run_sending(
+        r#"use send from mod bot;
+           put (try { send "" } catch e { put "[$e.message]" });
+           put (try { send hi pdf } catch e { put "[$e.message]" })"#,
+    );
+    let out = out.unwrap();
+    assert!(out.contains("empty"), "got {out:?}");
+    assert!(out.contains("unknown format"), "got {out:?}");
+    assert!(log.is_empty());
+}
+
+#[test]
+fn send_is_unavailable_without_a_chat_to_talk_to() {
+    let err = run_offline("use send from mod bot; send hi", &Config::default(), None).unwrap_err();
+    assert!(err.contains("cannot send"), "got {err:?}");
+}
+
+#[test]
+fn a_run_has_a_message_budget() {
+    let (out, log) = run_sending(
+        r#"use send from mod bot;
+           for i in (0..100) { send "m$i" }"#,
+    );
+    let err = out.unwrap_err();
+    assert!(err.contains("at most"), "got {err:?}");
+    assert_eq!(log.len(), runtime::MAX_MESSAGES as usize);
+}
+
+#[test]
+fn a_courier_failure_is_catchable() {
+    struct Down;
+    impl Courier for Down {
+        fn send(&self, _: Formatted, _: Option<Duration>) -> Result<i32, String> {
+            Err("Too Many Requests: retry after 3".into())
+        }
+        fn edit(&self, _: i32, _: Formatted, _: Option<Duration>) -> Result<(), String> {
+            Err("nope".into())
+        }
+    }
+    let out = run_offline(
+        r#"use send from mod bot; put (try { send hi } catch e { put $e.message })"#,
+        &Config::default(),
+        Some(Arc::new(Down)),
+    )
+    .unwrap();
+    assert!(out.contains("could not send") && out.contains("retry after 3"), "got {out:?}");
+}
+
+#[test]
+fn sleep_waits_then_continues() {
+    let started = Instant::now();
+    let out = run_offline(
+        "use sleep from mod bot; sleep 0.3; put done",
+        &Config::default(),
+        None,
+    )
+    .unwrap();
+    assert_eq!(out, "done");
+    assert!(started.elapsed() >= Duration::from_millis(300));
+}
+
+#[test]
+fn sleep_cannot_outlive_the_time_limit() {
+    let config = Config {
+        timeout: 0.4,
+        net: false,
+    };
+    let started = Instant::now();
+    let err = run_offline("use sleep from mod bot; sleep 60", &config, None).unwrap_err();
+    assert!(err.contains("too long"), "got {err:?}");
+    assert!(started.elapsed() < Duration::from_secs(5), "slept {:?}", started.elapsed());
+}
+
+#[test]
+fn sleep_rejects_nonsense() {
+    let out = run_offline(
+        r#"use sleep from mod bot;
+           put (try { sleep -1 } catch e { put "[negative]" });
+           put (try { sleep 1e400 } catch e { put "[huge]" })"#,
+        &Config { timeout: 0.3, net: false },
+        None,
+    );
+    // -1 is refused outright; an absurd value is clamped by the time limit.
+    let text = out.unwrap_or_else(|e| e);
+    assert!(text.contains("[negative]"), "got {text:?}");
+}
+
+/// The progress-bar example from the README, so the docs can't rot.
+#[test]
+fn the_readme_progress_example_runs() {
+    let (out, log) = run_sending(
+        r#"use post, edit, sleep from mod bot;
+
+           id = { post "Working… 0%" };
+           for pct in [25 50 75] {
+               sleep 0.01;
+               edit $id "Working… $pct%";
+           }
+           edit $id "Done.";"#,
+    );
+    assert_eq!(out.unwrap(), "");
+    assert_eq!(
+        log,
+        vec![
+            "send plain:Working… 0%",
+            "edit 101 plain:Working… 25%",
+            "edit 101 plain:Working… 50%",
+            "edit 101 plain:Working… 75%",
+            "edit 101 plain:Done.",
+        ]
+    );
 }

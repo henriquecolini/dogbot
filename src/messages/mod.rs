@@ -1,3 +1,4 @@
+mod courier;
 mod provider;
 mod runtime;
 
@@ -6,8 +7,10 @@ use dog4::{Builder, Capability, Limits, OutputBuffer, Value};
 use log::*;
 use provider::DogbotProvider;
 use serde::Deserialize;
+use std::cell::Cell;
 use std::collections::HashSet;
-use std::sync::{LazyLock, Mutex};
+use std::rc::Rc;
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 use teloxide::prelude::*;
 use tokio::time::interval;
@@ -97,8 +100,21 @@ pub async fn handle(
         reply_from: reply_to_from.unwrap_or_default(),
     };
     let (script_config, script_ctx) = (config.clone(), ctx.clone());
+    // Messages go to the chat the message came from, even when the script runs
+    // against another chat's files via `/connect`.
+    let courier = Arc::new(courier::TelegramCourier {
+        bot: bot.clone(),
+        pool: pool.clone(),
+        chat_id,
+        handle: tokio::runtime::Handle::current(),
+    });
+    let script_courier = courier.clone();
     let result = tokio::task::spawn_blocking(move || {
         let later = runtime::Later::default();
+        let hooks = Hooks {
+            later: Some(later.clone()),
+            courier: Some(script_courier),
+        };
         let output = run_script(
             script_pool,
             connected_chat_id,
@@ -106,7 +122,7 @@ pub async fn handle(
             &source,
             &script_config,
             &script_ctx,
-            Some(later.clone()),
+            hooks,
         );
         (output, later.take())
     })
@@ -131,7 +147,7 @@ pub async fn handle(
     // Only now, with the reply out and recorded, so the scripts see it in
     // `history`. Queued even when the script failed after calling `later`: the
     // upkeep it asked for is usually independent of whatever went wrong.
-    run_later(pool, connected_chat_id, user_id, later, config, ctx);
+    run_later(courier, pool, connected_chat_id, user_id, later, config, ctx);
     sent
 }
 
@@ -175,6 +191,7 @@ static BACKGROUND: LazyLock<Mutex<HashSet<i64>>> = LazyLock::new(Default::defaul
 /// them; their output is discarded and their errors only logged, since by now
 /// the reply has been sent.
 fn run_later(
+    courier: Arc<courier::TelegramCourier>,
     pool: PgPool,
     chat_id: ChatId,
     user_id: UserId,
@@ -202,7 +219,12 @@ fn run_later(
                         continue;
                     }
                 };
-                match run_script(pool.clone(), chat_id, user_id, &source, &config, &ctx, None) {
+                // A deferred script can talk to the chat but not queue more work.
+                let hooks = Hooks {
+                    later: None,
+                    courier: Some(courier.clone()),
+                };
+                match run_script(pool.clone(), chat_id, user_id, &source, &config, &ctx, hooks) {
                     Ok(_) => info!("Deferred script {path} finished"),
                     Err(err) => warn!("Deferred script {path} failed: {err}"),
                 }
@@ -224,13 +246,20 @@ pub struct ScriptContext {
     pub reply_from: String,
 }
 
+/// What a run can reach beyond its own computation.
+#[derive(Default)]
+pub struct Hooks {
+    /// Collects the scripts the run queues with `bot.later`; `None` makes that
+    /// function raise, which is what a deferred run itself gets.
+    pub later: Option<runtime::Later>,
+    /// Delivers `bot.send` and `bot.edit`; `None` makes them raise.
+    pub courier: Option<Arc<dyn courier::Courier>>,
+}
+
 /// Compiles and runs one script, returning what to reply with.
 ///
 /// `Ok` is a normal result, `Err` an error report; both may carry buffered
 /// output, because a script can print before it fails.
-///
-/// `later` collects the scripts the run queues with `bot.later`; `None` makes
-/// that function raise, which is what a deferred run itself gets.
 ///
 /// Synchronous on purpose: dog4's `Runtime` is not `Send`, and Diesel blocks,
 /// so this must run on a blocking thread.
@@ -241,14 +270,16 @@ fn run_script(
     source: &str,
     config: &Config,
     ctx: &ScriptContext,
-    later: Option<runtime::Later>,
+    hooks: Hooks,
 ) -> Result<String, String> {
     let out = OutputBuffer::default();
     let state = runtime::State {
         pool: pool.clone(),
         chat_id,
         user_id,
-        later,
+        later: hooks.later,
+        courier: hooks.courier,
+        budget: Rc::new(Cell::new(runtime::MAX_MESSAGES)),
     };
 
     let mut rt = Builder::sandboxed()

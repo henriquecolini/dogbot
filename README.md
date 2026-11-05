@@ -116,12 +116,57 @@ use read, write, ls, exists, history, version from mod bot;
 | `history [count] [offset] [with_bot]` | recent messages as maps of `user`, `content`, `is_bot` |
 | `version` | the running build |
 | `later path` | runs the script at `path` once this message has been answered |
+| `send text [format]` | sends a message to the chat right now, while the script runs |
+| `post text [format]` | like `send`, but returns the message's id |
+| `edit id text [format]` | rewrites a message `post` returned the id of |
+| `sleep seconds` | pauses the script |
 
 `later` is for upkeep nobody should wait on: summarising, reindexing, warming
 a cache. The script is checked for read and execute when queued and runs in the
 background after the reply is sent, with the same globals and permissions. Its
 output is discarded and its errors only logged. A chat runs one deferred script
 at a time, and a deferred script can't queue another.
+
+### Sending messages as you go
+
+The script's output is sent as one reply when it finishes. To say something
+earlier, or in several messages, or to show progress, use `send`, `post`,
+`edit` and `sleep`:
+
+```dog
+use send, post, edit, sleep from mod bot;
+
+send "Rolling…";
+sleep 1.5;
+send "<b>You rolled a 4</b>" html;
+```
+
+`format` is `plain` (the default), `markdown`, `html` or `code`. `markdown` is
+Telegram's MarkdownV2, which is strict: characters like `.`, `-` and `!` outside
+formatting must be escaped with `\`, or Telegram refuses the message and `send`
+raises. `html` is usually easier. Neither is shortened, so mind the 4096
+character limit; `plain` and `code` are cut for you.
+
+`send` returns nothing, because in dog4 a command's value is part of the reply
+and a stray message id would end up in it. Use `post` when you want the id, to
+build a progress message:
+
+```dog
+use post, edit, sleep from mod bot;
+
+id = { post "Working… 0%" };
+for pct in [25 50 75] {
+    sleep 1;
+    edit $id "Working… $pct%";
+}
+edit $id "Done.";
+```
+
+Messages sent this way appear in `history` like any other bot message, and
+whatever the script prints at the end still goes out as the final reply. A run
+may send or edit at most 40 messages, and `sleep` counts against the chat's
+`timeout`: a script that sleeps past it fails like any other that runs too long.
+Deferred (`later`) scripts can send too.
 
 Failures raise catchable errors rather than returning a status code:
 
