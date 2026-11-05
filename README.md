@@ -119,6 +119,7 @@ use read, write, ls, exists, history, version from mod bot;
 | `send text [format]` | sends a message to the chat right now, while the script runs |
 | `send_id text [format]` | like `send`, but returns the message's id |
 | `edit id text [format]` | rewrites a message `send_id` returned the id of |
+| `delete id` | deletes a message the bot sent, by the id `send_id` returned |
 | `sleep seconds` | pauses the script |
 
 `later` is for upkeep nobody should wait on: summarising, reindexing, warming
@@ -131,7 +132,7 @@ at a time, and a deferred script can't queue another.
 
 The script's output is sent as one reply when it finishes. To say something
 earlier, or in several messages, or to show progress, use `send`, `send_id`,
-`edit` and `sleep`:
+`edit`, `delete` and `sleep`:
 
 ```dog
 use send, send_id, edit, sleep from mod bot;
@@ -162,9 +163,16 @@ for pct in [25 50 75] {
 edit $id "Done.";
 ```
 
+`delete` removes a message again, for a "working…" notice that has served its
+purpose or a mistake you would rather take back. It only deletes messages the
+bot itself sent in that chat, never anyone else's, even where the bot is an
+admin. Telegram limits when bots may delete old messages, and if it refuses,
+`delete` raises with its reason. Ids don't survive the run on their own; keep
+one in a file with `write` if a later message needs to delete it.
+
 Messages sent this way appear in `history` like any other bot message, and
 whatever the script prints at the end still goes out as the final reply. A run
-may send or edit at most 40 messages, and `sleep` counts against the chat's
+may send, edit or delete at most 40 messages, and `sleep` counts against the chat's
 `timeout`: a script that sleeps past it fails like any other that runs too long.
 Deferred (`later`) scripts can send too.
 

@@ -36,6 +36,20 @@ impl Message {
             .execute(cn)?;
         Ok(())
     }
+    /// Whether the bot itself sent this message (bot messages have no user).
+    pub fn sent_by_bot(cn: &mut PgConnection, id: MessageId, chat_id: ChatId) -> QueryResult<bool> {
+        let found = messages::messages
+            .find((id.0 as i64, chat_id.0))
+            .select(messages::user_id)
+            .first::<Option<i64>>(cn)
+            .optional()?;
+        Ok(matches!(found, Some(None)))
+    }
+    /// Forgets a message, so `history` stops listing one that was deleted.
+    pub fn remove(cn: &mut PgConnection, id: MessageId, chat_id: ChatId) -> QueryResult<()> {
+        delete(messages::messages.find((id.0 as i64, chat_id.0))).execute(cn)?;
+        Ok(())
+    }
     /// Records that a message was edited, so `history` shows its current text.
     pub fn update_content(
         cn: &mut PgConnection,

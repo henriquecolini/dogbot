@@ -17,6 +17,8 @@ pub trait Courier: Send + Sync {
     fn send(&self, text: Formatted, within: Option<Duration>) -> Result<i32, String>;
     /// Replaces the text of a message this run (or an earlier one) sent.
     fn edit(&self, id: i32, text: Formatted, within: Option<Duration>) -> Result<(), String>;
+    /// Deletes a message the bot sent. Refuses anyone else's.
+    fn delete(&self, id: i32, within: Option<Duration>) -> Result<(), String>;
 }
 
 /// The real thing: sends through the bot and records what it sent.
@@ -85,6 +87,31 @@ impl Courier for TelegramCourier {
         };
         let content = edited.text().unwrap_or_default().to_owned();
         self.record(|cn| model::Message::update_content(cn, MessageId(id), self.chat_id, &content));
+        Ok(())
+    }
+
+    fn delete(&self, id: i32, within: Option<Duration>) -> Result<(), String> {
+        let message = MessageId(id);
+        // Only what the bot recorded as its own: being a group admin must not
+        // let a script remove people's messages.
+        let ours = self
+            .pool
+            .get()
+            .map_err(|err| err.to_string())
+            .and_then(|mut cn| {
+                model::Message::sent_by_bot(&mut cn, message, self.chat_id)
+                    .map_err(|err| err.to_string())
+            })?;
+        if !ours {
+            return Err("that is not a message the bot sent in this chat".to_string());
+        }
+        match self.wait(within, self.bot.delete_message(self.chat_id, message).into_future()) {
+            Ok(_) => {}
+            // Already gone (deleted by hand): the goal is met either way.
+            Err(err) if err.contains("message to delete not found") => {}
+            Err(err) => return Err(err),
+        }
+        self.record(|cn| model::Message::remove(cn, message, self.chat_id));
         Ok(())
     }
 }

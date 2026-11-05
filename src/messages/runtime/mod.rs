@@ -79,7 +79,7 @@ impl State {
         let left = self.budget.get();
         if left == 0 {
             return Err(Error::value_error(format!(
-                "a script may send or edit at most {MAX_MESSAGES} messages per run"
+                "a script may send, edit or delete at most {MAX_MESSAGES} messages per run"
             )));
         }
         self.budget.set(left - 1);
@@ -277,6 +277,21 @@ pub fn build(state: State) -> Value {
             Ok(Value::Null)
         });
     }
+
+    // Deletes a message the bot sent, by the id `send_id` returned. Telegram
+    // only lets bots delete recent messages, and the error says so when it won't.
+    let s = state.clone();
+    lib.def("delete", "id: num", move |vm, args| {
+        let id = args[0]
+            .as_int()
+            .and_then(|id| i32::try_from(id).ok())
+            .ok_or_else(|| Error::value_error("delete needs a message id from send_id"))?;
+        s.courier()?
+            .delete(id, vm.meter().remaining())
+            .map_err(|err| Error::value_error(format!("could not delete: {err}")))?;
+        vm.meter().check_now()?;
+        Ok(Value::Null)
+    });
 
     // Pauses the script, so messages can be paced. Counts against the run's
     // time limit like everything else, and fails with the usual timeout error

@@ -449,6 +449,10 @@ impl Courier for FakeCourier {
         self.log.lock().unwrap().push(format!("edit {id} {}", describe(&text)));
         Ok(())
     }
+    fn delete(&self, id: i32, _: Option<Duration>) -> Result<(), String> {
+        self.log.lock().unwrap().push(format!("delete {id}"));
+        Ok(())
+    }
 }
 
 fn offline_pool() -> PgPool {
@@ -491,7 +495,7 @@ fn run_sending(source: &str) -> (Result<String, String>, Vec<String>) {
 }
 
 #[test]
-fn send_and_send_id_deliver_in_each_format_and_only_post_returns_the_id() {
+fn send_and_send_id_deliver_in_each_format_and_only_send_id_returns_the_id() {
     let (out, log) = run_sending(
         r#"use send, send_id from mod bot;
            send "one";
@@ -534,6 +538,53 @@ fn edit_rewrites_a_message_sent_earlier() {
 }
 
 #[test]
+fn delete_removes_a_message_by_id() {
+    let (out, log) = run_sending(
+        r#"use send_id, delete from mod bot;
+           id = { send_id "oops" };
+           delete $id;
+           put gone"#,
+    );
+    assert_eq!(out.unwrap(), "gone");
+    assert_eq!(log, vec!["send plain:oops", "delete 101"]);
+}
+
+#[test]
+fn delete_needs_a_real_id_and_reports_refusals() {
+    let (out, log) = run_sending(
+        r#"use delete from mod bot;
+           put (try { delete hello } catch e { put "[$e.message]" });
+           put (try { delete 1.5 } catch e { put "[$e.message]" })"#,
+    );
+    let out = out.unwrap();
+    assert!(out.contains("expects a num"), "got {out:?}");
+    assert!(out.contains("needs a message id"), "got {out:?}");
+    assert!(log.is_empty());
+
+    let out = run_offline(
+        r#"use delete from mod bot; put (try { delete 5 } catch e { put $e.message })"#,
+        &Config::default(),
+        Some(Arc::new(Refusing)),
+    )
+    .unwrap();
+    assert!(out.contains("could not delete") && out.contains("not yours"), "got {out:?}");
+}
+
+/// A courier that refuses to delete, as the real one does for other people's messages.
+struct Refusing;
+impl Courier for Refusing {
+    fn send(&self, _: Formatted, _: Option<Duration>) -> Result<i32, String> {
+        Ok(1)
+    }
+    fn edit(&self, _: i32, _: Formatted, _: Option<Duration>) -> Result<(), String> {
+        Ok(())
+    }
+    fn delete(&self, _: i32, _: Option<Duration>) -> Result<(), String> {
+        Err("not yours".into())
+    }
+}
+
+#[test]
 fn send_refuses_what_telegram_would() {
     let (out, log) = run_sending(
         r#"use send from mod bot;
@@ -572,6 +623,9 @@ fn a_courier_failure_is_catchable() {
         }
         fn edit(&self, _: i32, _: Formatted, _: Option<Duration>) -> Result<(), String> {
             Err("nope".into())
+        }
+        fn delete(&self, _: i32, _: Option<Duration>) -> Result<(), String> {
+            Err("not yours".into())
         }
     }
     let out = run_offline(
