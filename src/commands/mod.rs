@@ -10,6 +10,7 @@ pub mod download;
 pub mod help;
 pub mod hostname;
 pub mod id;
+pub mod init;
 pub mod key;
 pub mod ls;
 pub mod mkdir;
@@ -17,6 +18,7 @@ pub mod mv;
 pub mod mount;
 pub mod read;
 pub mod rm;
+pub mod start;
 pub mod upload;
 pub mod write;
 
@@ -25,6 +27,7 @@ use chown::ChownCommand;
 use connect::ConnectCommand;
 use download::DownloadCommand;
 use hostname::HostnameCommand;
+use init::InitCommand;
 use ls::LsCommand;
 use mkdir::MkdirCommand;
 use mv::MvCommand;
@@ -32,6 +35,7 @@ use key::KeyCommand;
 use mount::MountCommand;
 use read::ReadCommand;
 use rm::RmCommand;
+use start::StartCommand;
 use upload::UploadCommand;
 use write::WriteCommand;
 
@@ -39,9 +43,13 @@ use write::WriteCommand;
 #[command(rename_rule = "lowercase")]
 #[command(parse_with = parse_args)]
 pub enum Command {
+    #[command(description = "what this bot is and how to get going")]
+    Start(StartCommand),
     #[command(description = "shows this message")]
     Help,
-    #[command(description = "sets a unique hostname for the chat")]
+    #[command(description = "writes a starter main.dog; /init <name> also sets the hostname")]
+    Init(InitCommand),
+    #[command(description = "sets a unique hostname for the chat, its SSH username")]
     Hostname(HostnameCommand),
     #[command(description = "connects to another chat")]
     Connect(ConnectCommand),
@@ -66,15 +74,25 @@ pub enum Command {
     Chown(ChownCommand),
     #[command(description = "shows current user and chat IDs")]
     Id,
-    #[command(description = "manages your SSH keys for filesystem access")]
+    #[command(description = "manages your SSH keys: /key add github:you, /key list, /key rm <n>")]
     Key(KeyCommand),
-    #[command(description = "shows how to mount this chat's filesystem")]
+    #[command(description = "shows how to reach this chat's files and console over SSH")]
     Mount(MountCommand),
     #[command(description = "uploads data to a file, creating it if it doesn't exist")]
     Upload(UploadCommand),
     #[command(description = "downloads a file")]
     Download(DownloadCommand),
 }
+
+/// Where the guide lives, for `/start` and `/help`. Operators of another
+/// instance point it at their own copy with `DOCS_URL`.
+pub fn docs_url() -> String {
+    std::env::var("DOCS_URL")
+        .unwrap_or_else(|_| "https://github.com/henriquecolini/dogbot#readme".to_string())
+}
+
+/// Where to try dog4 in a browser.
+pub const DOG4_PLAYGROUND: &str = "https://henriquecolini.github.io/dog4/";
 
 impl Command {
     /// The name the user typed, e.g. `ls`; the variant's name in lowercase.

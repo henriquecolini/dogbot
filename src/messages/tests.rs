@@ -703,8 +703,64 @@ fn the_readme_progress_example_runs() {
 }
 
 #[test]
+fn the_starter_script_answers_and_counts() {
+    script_test!(h);
+    let starter = crate::commands::init::MAIN_TEMPLATE;
+    let say = |message: &str| h.run_as(starter, message, "", "").unwrap();
+    assert_eq!(say("ping"), "pong");
+    assert_eq!(say("Hello there"), "Hi Tester! Edit main.dog to teach me something new.");
+    assert_eq!(say("count"), "I've counted to 1.");
+    assert_eq!(say("count"), "I've counted to 2.");
+    // Anything else gets no reply, so the starter is quiet in a group.
+    assert_eq!(say("what's up"), "");
+    assert_eq!(say(""), "");
+}
+
+#[test]
+fn init_lets_every_member_of_a_group_run_the_starter() {
+    script_test!(h);
+    let mut cn = h.pool.get().unwrap();
+    crate::commands::init::init(&mut cn, h.chat, USER, None).unwrap();
+    assert!(
+        crate::commands::init::init(&mut cn, h.chat, USER, None).is_err(),
+        "a second /init must not overwrite main.dog"
+    );
+
+    // main.dog runs with the sender's permissions, so the rest of the group
+    // needs read and execute too.
+    let member = UserId(80002);
+    model::User::upsert(&mut cn, member, "Member", None, None).unwrap();
+    model::UserInChat::upsert(&mut cn, member, h.chat).unwrap();
+    assert!(load_main(&mut cn, h.chat, member).is_ok());
+
+    let outsider = UserId(80003);
+    let err = load_main(&mut cn, h.chat, outsider).unwrap_err();
+    assert!(matches!(err, files::FileError::NotEnoughPermissions(_)), "{err:?}");
+    assert!(explain_missing(&err).unwrap().contains("chmod"));
+}
+
+#[test]
 fn a_chat_without_main_dog_says_how_to_make_one() {
     script_test!(h);
     let err = load_main(&mut h.pool.get().unwrap(), h.chat, USER).unwrap_err();
     assert!(explain_missing(&err).unwrap().contains("/init"));
+}
+
+#[test]
+fn a_refused_init_changes_nothing() {
+    script_test!(h);
+    let mut cn = h.pool.get().unwrap();
+    // A name that's not allowed: the files must not be written either.
+    assert!(crate::commands::init::init(&mut cn, h.chat, USER, Some("bad name")).is_err());
+    assert!(matches!(
+        files::stat(&mut cn, h.chat, USER, "main.dog"),
+        Err(files::FileError::FileNotFound(_))
+    ));
+
+    // And with main.dog already there, a second /init must not rename the chat.
+    let name = format!("init{}", h.chat.0.unsigned_abs());
+    crate::commands::init::init(&mut cn, h.chat, USER, Some(&name)).unwrap();
+    assert!(crate::commands::init::init(&mut cn, h.chat, USER, Some("othername")).is_err());
+    let chat = model::Chat::find(&mut cn, ChatAddress::Id(h.chat)).unwrap().unwrap();
+    assert_eq!(chat.alias.as_deref(), Some(name.as_str()));
 }

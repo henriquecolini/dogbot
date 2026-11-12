@@ -102,8 +102,18 @@ async fn main() {
     });
 
     let bot = Bot::from_env();
+
+    // The menu Telegram shows behind the `/` button. Without it, a newcomer
+    // has to know the commands before they can find them.
+    if let Err(err) = bot.set_my_commands(Command::bot_commands()).await {
+        warn!("Could not set the command menu: {err}");
+    }
+
     let handler = Update::filter_message()
         .map(move || pool.clone())
+        .branch(
+            dptree::filter(added_to_group).endpoint(greet_group),
+        )
         .branch(
             dptree::entry()
                 .filter_map_async(extract_context)
@@ -117,7 +127,9 @@ async fn main() {
                         .inspect(|cmd: Command| info!("Received command: {cmd:?}"))
                         .branch(report_errors(
                             dptree::entry()
+                            .branch(case![Command::Start(c)].endpoint(start::handle))
                             .branch(case![Command::Help].endpoint(help::handle))
+                            .branch(case![Command::Init(c)].endpoint(init::handle))
                             .branch(case![Command::Hostname(c)].endpoint(hostname::handle))
                             .branch(case![Command::Connect(c)].endpoint(connect::handle))
                             .branch(case![Command::Disconnect].endpoint(disconnect::handle))
@@ -261,6 +273,7 @@ async fn extract_maybe_command(
     Context {
         message_content,
         chat_id,
+        chat_is_private,
         ..
     }: Context,
     me: Me,
@@ -272,11 +285,20 @@ async fn extract_maybe_command(
     match Command::parse(&message_content, &bot_name) {
         Ok(command) => Some(MaybeCommand::Command(command)),
         Err(ParseError::WrongBotName(_)) => None,
-        // Unknown commands only get an error when explicitly addressed to this
-        // bot (`/blah@bot_name`); otherwise they may belong to another bot.
+        // In a group, unknown commands only get an error when explicitly
+        // addressed to this bot (`/blah@bot_name`); otherwise they may belong
+        // to another bot. A private chat has no other bot to answer them.
         Err(ParseError::UnknownCommand(_))
-            if !is_addressed_to(&message_content, &bot_name) =>
+            if !chat_is_private && !is_addressed_to(&message_content, &bot_name) =>
         {
+            None
+        }
+        Err(ParseError::UnknownCommand(command)) => {
+            let command = command.trim_start_matches('/');
+            let message = format!("unknown command /{command}; /help lists them");
+            if let Err(err) = bot.send_error(chat_id, None, message).await {
+                error!("Failed to send error message: {}", err);
+            }
             None
         }
         Err(err) => {
@@ -322,6 +344,19 @@ fn report_errors(
         },
         HandlerSignature::Entry,
     )
+}
+
+/// Whether this message is the bot being added to a group.
+fn added_to_group(msg: Message, me: Me) -> bool {
+    msg.new_chat_members()
+        .is_some_and(|members| members.iter().any(|m| m.id == me.user.id))
+}
+
+/// Says hello to a group that has just added the bot, so nobody is left
+/// wondering why it sits there in silence.
+async fn greet_group(bot: Bot, msg: Message) -> BotResult<()> {
+    bot.send_html(msg.chat.id, start::group_welcome()).await?;
+    Ok(())
 }
 
 fn filter_map_command(maybe_command: MaybeCommand) -> Option<Command> {

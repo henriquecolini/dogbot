@@ -1,0 +1,30 @@
+// main.dog: this chat's bot. It runs on every message that isn't a /command,
+// and whatever it outputs is the reply. No output means no reply.
+//
+// The message arrives in globals: $message is the text, $sender who sent it,
+// and $reply / $reply_from the message it answered, if any.
+//
+// dog4 in one breath: statements end with `;` (newlines don't), `$x` reads a
+// variable and `x = …` sets one, `{ cmd args }` runs a command and gives its
+// value, and `( … )` holds operators: ($n + 1), ($a == $b).
+// Try things in the playground: https://henriquecolini.github.io/dog4/
+
+use read, write from mod bot;
+
+words = { split $message };
+command = { lower ($words[0] ?? "") };
+
+// An `if` on its own throws its value away, so the reply is wrapped in
+// `put ( … )`. When no branch matches, the `if` is null and nothing is sent.
+put (if ($command == ping) {
+    put pong
+} else if ($command == hi || $command == hello) {
+    put "Hi $sender! Edit main.dog to teach me something new."
+} else if ($command == count) {
+    // Files outlive the message. `read` raises when the file is missing, and
+    // `try … catch` turns that into a 0.
+    n = try { read count.txt } catch e 0;
+    n = (num($n) + 1);
+    write count.txt $n;
+    put "I've counted to $n."
+})
