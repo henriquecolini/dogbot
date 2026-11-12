@@ -19,7 +19,7 @@ use diesel_migrations::{EmbeddedMigrations, MigrationHarness, embed_migrations};
 use log::*;
 use std::ops::ControlFlow;
 use teloxide::dispatching::DpHandlerDescription;
-use teloxide::dptree::{self, case, Handler, HandlerSignature};
+use teloxide::dptree::{self, case, Handler};
 use teloxide::prelude::DependencyMap;
 use teloxide::prelude::*;
 use teloxide::types::*;
@@ -109,7 +109,17 @@ async fn main() {
         warn!("Could not set the command menu: {err}");
     }
 
-    let handler = Update::filter_message()
+    Dispatcher::builder(bot, schema(pool)).build().dispatch().await;
+
+    sftp.abort();
+}
+
+/// The dispatcher's handler tree.
+///
+/// dptree type-checks the tree while it is built and panics on a mistake, so
+/// building it is covered by a test rather than discovered at startup.
+fn schema(pool: PgPool) -> Handler<'static, BotResult<()>, DpHandlerDescription> {
+    Update::filter_message()
         .map(move || pool.clone())
         .branch(
             dptree::filter(added_to_group).endpoint(greet_group),
@@ -155,10 +165,7 @@ async fn main() {
                         .endpoint(messages::handle),
                 ),
         )
-        .endpoint(default_endpoint);
-    Dispatcher::builder(bot, handler).build().dispatch().await;
-
-    sftp.abort();
+        .endpoint(default_endpoint)
 }
 
 fn register_message(
@@ -324,6 +331,9 @@ fn is_addressed_to(message_content: &str, bot_name: &str) -> bool {
 fn report_errors(
     inner: Handler<'static, BotResult<()>, DpHandlerDescription>,
 ) -> Handler<'static, BotResult<()>, DpHandlerDescription> {
+    // Borrow the inner handler's signature. `Entry` would make dptree panic
+    // as soon as this is passed to `.branch()`, which happens at startup.
+    let sig = inner.sig().clone();
     dptree::from_fn_with_description(
         inner.description().clone(),
         move |deps: DependencyMap, _cont| {
@@ -342,7 +352,7 @@ fn report_errors(
                 }
             }
         },
-        HandlerSignature::Entry,
+        sig,
     )
 }
 
@@ -412,6 +422,16 @@ mod error_tests {
         deps.insert(context());
         deps.insert(Command::Help);
         report_errors(handler).dispatch(deps).await
+    }
+
+    /// Mirrors `main`: dptree checks the tree while `schema` builds it, and
+    /// teloxide checks its dependencies in `build`. Both panic at startup.
+    #[tokio::test]
+    async fn the_dispatcher_builds() {
+        // Never connects: the pool and bot are only needed to build the tree.
+        let pool = Pool::builder().build_unchecked(ConnectionManager::new("postgres://unused"));
+        let bot = Bot::new("1:test");
+        let _ = Dispatcher::builder(bot, schema(pool)).build();
     }
 
     #[tokio::test]
