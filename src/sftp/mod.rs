@@ -19,7 +19,7 @@ mod tests;
 use crate::prelude::*;
 use fs::DogFs;
 use log::*;
-use russh::keys::{Algorithm, PrivateKey, PublicKey};
+use russh::keys::{Algorithm, HashAlg, PrivateKey, PublicKey};
 use russh::server::{Auth, ChannelOpenHandle, Config, Msg, Server as _, Session};
 use russh::{Channel, ChannelId, MethodKind, MethodSet};
 use std::borrow::Cow;
@@ -60,6 +60,15 @@ fn load_or_create_host_key(pool: &PgPool) -> anyhow::Result<PrivateKey> {
     let pem = key.to_openssh(russh::keys::ssh_key::LineEnding::LF)?;
     model::Setting::set(&mut cn, HOST_KEY_SETTING, pem.as_bytes())?;
     Ok(key)
+}
+
+/// The SHA-256 fingerprint of the server's host key, for users to check
+/// against what `ssh` shows on first connect. `None` before the SSH server has
+/// started for the first time and made one.
+pub fn host_key_fingerprint(cn: &mut PgConnection) -> Option<String> {
+    let bytes = model::Setting::get(cn, HOST_KEY_SETTING).ok()??;
+    let key = PrivateKey::from_openssh(String::from_utf8(bytes).ok()?).ok()?;
+    Some(key.public_key().fingerprint(HashAlg::Sha256).to_string())
 }
 
 /// Parses an SSH username into the chat it refers to.
