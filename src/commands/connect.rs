@@ -20,12 +20,9 @@ pub async fn handle(
 ) -> BotResult<()> {
     let mut cn = pool.get()?;
     if !chat_is_private {
-        bot.send_code(
-            chat_id,
-            "connect: you may only connect to another chat within a private chat",
-        )
-        .await?;
-        return Ok(());
+        return Err(BotError::user(
+            "you may only connect to another chat within a private chat",
+        ));
     }
     let address = ChatAddress::parse(&address);
     let chat = model::Chat::find(&mut cn, address)?;
@@ -35,11 +32,10 @@ pub async fn handle(
             bot.send_code(chat_id, format!("connected to {address}"))
                 .await?;
         } else {
-            bot.send_code(chat_id, "connect: unauthorized")
-                .await?;
+            return Err(BotError::user("unauthorized"));
         }
     } else {
-        bot.send_code(chat_id, format!("connect: could not resolve hostname {address}")).await?;
+        return Err(BotError::user(format!("could not resolve hostname {address}")));
     }
     Ok(())
 }

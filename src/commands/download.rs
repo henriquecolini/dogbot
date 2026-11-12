@@ -19,14 +19,7 @@ pub async fn handle(
 	DownloadCommand { path }: DownloadCommand,
 ) -> BotResult<()> {
 	let mut cn = pool.get()?;
-	match files::read(&mut cn, connected_chat_id, user_id, &path) {
-		Ok((name, content)) => {
-			bot.send_document(chat_id, InputFile::memory(content).file_name(name)).await?;
-		}
-		Err(err) => {
-			bot.send_code(chat_id, format!("download: {}", err))
-				.await?;
-		}
-	}
+	let (name, content) = files::read(&mut cn, connected_chat_id, user_id, &path)?;
+	bot.send_document(chat_id, InputFile::memory(content).file_name(name)).await?;
 	Ok(())
 }

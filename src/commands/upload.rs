@@ -12,7 +12,6 @@ pub async fn handle(
     bot: Bot,
     pool: PgPool,
     Context {
-        chat_id,
         user_id,
         connected_chat_id,
         document,
@@ -21,8 +20,7 @@ pub async fn handle(
     UploadCommand { path }: UploadCommand,
 ) -> BotResult<()> {
     let Some(document) = document else {
-        bot.send_code(chat_id, "upload: missing document").await?;
-        return Ok(());
+        return Err(BotError::user("missing document"));
     };
     let file = bot.get_file(document.file.id).await?;
     let mut bytes = Vec::new();
@@ -30,17 +28,12 @@ pub async fn handle(
         .await
         .map_err(anyhow::Error::from)?;
     let mut cn = pool.get()?;
-    match crate::files::write(
+    crate::files::write(
         &mut cn,
         connected_chat_id,
         user_id,
         path.trim(),
         bytes.as_slice(),
-    ) {
-        Ok(_) => {}
-        Err(err) => {
-            bot.send_code(chat_id, format!("upload: {}", err)).await?;
-        }
-    }
+    )?;
     Ok(())
 }

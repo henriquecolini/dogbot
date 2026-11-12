@@ -1,4 +1,5 @@
 use crate::prelude::*;
+use std::fmt::Display;
 use teloxide::payloads::{EditMessageText, EditMessageTextSetters, SendMessage, SendMessageSetters};
 use teloxide::requests::JsonRequest;
 use teloxide::types::{MessageId, ParseMode};
@@ -74,6 +75,15 @@ pub trait SendFormatted {
     ) -> JsonRequest<SendMessage> {
         self.send_formatted(chat_id, code(text))
     }
+    /// Sends a failure, the same way for every command: `cmd: message`.
+    fn send_error<C: Into<Recipient>>(
+        &self,
+        chat_id: C,
+        cmd: Option<&str>,
+        message: impl Display,
+    ) -> JsonRequest<SendMessage> {
+        self.send_formatted(chat_id, error(cmd, message))
+    }
     fn send_html<C: Into<Recipient>>(
         &self,
         chat_id: C,
@@ -130,6 +140,15 @@ pub fn raw(input: impl AsRef<str>) -> Formatted {
 
 pub fn code(input: impl AsRef<str>) -> Formatted {
     Formatted::Code(input.as_ref().to_owned())
+}
+
+/// How a failure looks in the chat: `cmd: message`, or just the message when it
+/// does not come from a command.
+pub fn error(cmd: Option<&str>, message: impl Display) -> Formatted {
+    match cmd {
+        Some(cmd) => Formatted::Code(format!("{cmd}: {message}")),
+        None => Formatted::Code(message.to_string()),
+    }
 }
 
 pub fn html(input: impl AsRef<str>) -> Formatted {

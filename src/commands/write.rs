@@ -1,5 +1,4 @@
 use crate::prelude::*;
-use teloxide::prelude::*;
 use teloxide::utils::command::ParseError;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -9,10 +8,8 @@ pub struct WriteCommand {
 }
 
 pub async fn handle(
-    bot: Bot,
     pool: PgPool,
     Context {
-        chat_id,
         user_id,
         connected_chat_id,
         ..
@@ -20,19 +17,13 @@ pub async fn handle(
     WriteCommand { path, content }: WriteCommand,
 ) -> BotResult<()> {
     let mut cn = pool.get()?;
-    match crate::files::write(
+    crate::files::write(
         &mut cn,
         connected_chat_id,
         user_id,
         path.trim(),
         content.as_bytes(),
-    ) {
-        Ok(_) => {}
-        Err(err) => {
-            bot.send_code(chat_id, format!("write: {}", err))
-                .await?;
-        }
-    }
+    )?;
     Ok(())
 }
 

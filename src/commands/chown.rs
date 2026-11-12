@@ -9,10 +9,8 @@ pub struct ChownCommand {
 }
 
 pub async fn handle(
-    bot: Bot,
     pool: PgPool,
     Context {
-        chat_id,
         user_id,
         connected_chat_id,
         ..
@@ -28,13 +26,9 @@ pub async fn handle(
     };
 
     let Some(new_owner) = new_owner else {
-        bot.send_code(chat_id, format!("chown: {owner}: no such user"))
-            .await?;
-        return Ok(());
+        return Err(BotError::user(format!("{owner}: no such user")));
     };
 
-    if let Err(err) = files::set_owner(&mut cn, connected_chat_id, user_id, &path, new_owner) {
-        bot.send_code(chat_id, format!("chown: {err}")).await?;
-    }
+    files::set_owner(&mut cn, connected_chat_id, user_id, &path, new_owner)?;
     Ok(())
 }

@@ -17,7 +17,10 @@ use diesel::r2d2::{ConnectionManager, Pool};
 use diesel::*;
 use diesel_migrations::{EmbeddedMigrations, MigrationHarness, embed_migrations};
 use log::*;
-use teloxide::dptree::case;
+use std::ops::ControlFlow;
+use teloxide::dispatching::DpHandlerDescription;
+use teloxide::dptree::{self, case, Handler, HandlerSignature};
+use teloxide::prelude::DependencyMap;
 use teloxide::prelude::*;
 use teloxide::types::*;
 use teloxide::utils::command::{BotCommands, ParseError};
@@ -112,23 +115,26 @@ async fn main() {
                     dptree::entry()
                         .filter_map(filter_map_command)
                         .inspect(|cmd: Command| info!("Received command: {cmd:?}"))
-                        .branch(case![Command::Help].endpoint(help::handle))
-                        .branch(case![Command::Hostname(c)].endpoint(hostname::handle))
-                        .branch(case![Command::Connect(c)].endpoint(connect::handle))
-                        .branch(case![Command::Disconnect].endpoint(disconnect::handle))
-                        .branch(case![Command::Ls(c)].endpoint(ls::handle))
-                        .branch(case![Command::Mkdir(c)].endpoint(mkdir::handle))
-                        .branch(case![Command::Write(c)].endpoint(write::handle))
-                        .branch(case![Command::Read(c)].endpoint(read::handle))
-                        .branch(case![Command::Rm(c)].endpoint(rm::handle))
-                        .branch(case![Command::Mv(c)].endpoint(mv::handle))
-                        .branch(case![Command::Chmod(c)].endpoint(chmod::handle))
-                        .branch(case![Command::Chown(c)].endpoint(chown::handle))
-                        .branch(case![Command::Id].endpoint(id::handle))
-                        .branch(case![Command::Key(c)].endpoint(key::handle))
-                        .branch(case![Command::Mount(c)].endpoint(mount::handle))
-                        .branch(case![Command::Upload(c)].endpoint(upload::handle))
-                        .branch(case![Command::Download(c)].endpoint(download::handle)),
+                        .branch(report_errors(
+                            dptree::entry()
+                            .branch(case![Command::Help].endpoint(help::handle))
+                            .branch(case![Command::Hostname(c)].endpoint(hostname::handle))
+                            .branch(case![Command::Connect(c)].endpoint(connect::handle))
+                            .branch(case![Command::Disconnect].endpoint(disconnect::handle))
+                            .branch(case![Command::Ls(c)].endpoint(ls::handle))
+                            .branch(case![Command::Mkdir(c)].endpoint(mkdir::handle))
+                            .branch(case![Command::Write(c)].endpoint(write::handle))
+                            .branch(case![Command::Read(c)].endpoint(read::handle))
+                            .branch(case![Command::Rm(c)].endpoint(rm::handle))
+                            .branch(case![Command::Mv(c)].endpoint(mv::handle))
+                            .branch(case![Command::Chmod(c)].endpoint(chmod::handle))
+                            .branch(case![Command::Chown(c)].endpoint(chown::handle))
+                            .branch(case![Command::Id].endpoint(id::handle))
+                            .branch(case![Command::Key(c)].endpoint(key::handle))
+                            .branch(case![Command::Mount(c)].endpoint(mount::handle))
+                            .branch(case![Command::Upload(c)].endpoint(upload::handle))
+                            .branch(case![Command::Download(c)].endpoint(download::handle))
+                        )),
                 )
                 .branch(
                     dptree::entry()
@@ -274,7 +280,7 @@ async fn extract_maybe_command(
             None
         }
         Err(err) => {
-            if let Err(err) = bot.send_code(chat_id, err.to_string()).await {
+            if let Err(err) = bot.send_error(chat_id, None, err).await {
                 error!("Failed to send error message: {}", err);
             }
             None
@@ -289,6 +295,33 @@ fn is_addressed_to(message_content: &str, bot_name: &str) -> bool {
         .next()
         .and_then(|token| token.split_once('@'))
         .is_some_and(|(_, name)| name.eq_ignore_ascii_case(bot_name))
+}
+
+/// Wraps the command handlers so that an error they return reaches the chat
+/// through [`report_error`], instead of the dispatcher only logging it.
+fn report_errors(
+    inner: Handler<'static, BotResult<()>, DpHandlerDescription>,
+) -> Handler<'static, BotResult<()>, DpHandlerDescription> {
+    dptree::from_fn_with_description(
+        inner.description().clone(),
+        move |deps: DependencyMap, _cont| {
+            let inner = inner.clone();
+            async move {
+                let bot = deps.get::<Bot>();
+                let chat_id = deps.get::<Context>().chat_id;
+                let cmd = deps.get::<Command>().name();
+                match inner.dispatch(deps.clone()).await {
+                    ControlFlow::Break(Err(err)) => {
+                        report_error(&bot, chat_id, &cmd, &err).await;
+                        ControlFlow::Break(Ok(()))
+                    }
+                    ControlFlow::Break(Ok(())) => ControlFlow::Break(Ok(())),
+                    ControlFlow::Continue(_) => ControlFlow::Continue(deps),
+                }
+            }
+        },
+        HandlerSignature::Entry,
+    )
 }
 
 fn filter_map_command(maybe_command: MaybeCommand) -> Option<Command> {
@@ -307,4 +340,76 @@ fn filter_map_not_command(maybe_command: MaybeCommand) -> Option<()> {
 
 async fn default_endpoint() -> BotResult<()> {
     Ok(())
+}
+
+#[cfg(test)]
+mod error_tests {
+    use super::*;
+    use crate::formatted::{Formatted, error};
+    use clap::Parser;
+
+    fn context() -> Context {
+        Context {
+            chat_id: ChatId(1),
+            user_id: UserId(1),
+            connected_chat_id: ChatId(1),
+            message_id: MessageId(1),
+            chat_name: String::new(),
+            chat_is_private: true,
+            user_first_name: String::new(),
+            user_last_name: None,
+            user_full_name: String::new(),
+            user_username: None,
+            message_content: String::new(),
+            reply_to_content: None,
+            reply_to_from: None,
+            document: None,
+        }
+    }
+
+    async fn run(
+        handler: Handler<'static, BotResult<()>, DpHandlerDescription>,
+    ) -> ControlFlow<BotResult<()>, DependencyMap> {
+        // Nothing listens on this port, so reporting fails fast and is only logged.
+        let bot = Bot::new("1:test").set_api_url("http://127.0.0.1:9".parse().unwrap());
+        let mut deps = DependencyMap::new();
+        deps.insert(bot);
+        deps.insert(context());
+        deps.insert(Command::Help);
+        report_errors(handler).dispatch(deps).await
+    }
+
+    #[tokio::test]
+    async fn a_failing_command_is_handled_instead_of_bubbling_up() {
+        let failing = dptree::entry().endpoint(|| async { Err(BotError::user("nope")) });
+        assert!(matches!(run(failing).await, ControlFlow::Break(Ok(()))));
+    }
+
+    #[tokio::test]
+    async fn success_and_non_matching_handlers_pass_through() {
+        let ok = dptree::entry().endpoint(|| async { Ok(()) });
+        assert!(matches!(run(ok).await, ControlFlow::Break(Ok(()))));
+        let skipped = dptree::entry().filter(|| false).endpoint(|| async { Ok(()) });
+        assert!(matches!(run(skipped).await, ControlFlow::Continue(_)));
+    }
+
+    #[test]
+    fn command_names_are_what_the_user_types() {
+        assert_eq!(Command::Help.name(), "help");
+        assert_eq!(Command::Disconnect.name(), "disconnect");
+        let ls = Command::Ls(ls::LsCommand::parse_from(["ls", "-l"]));
+        assert_eq!(ls.name(), "ls");
+    }
+
+    #[test]
+    fn errors_look_the_same_everywhere() {
+        let Formatted::Code(with_cmd) = error(Some("ls"), "x: file not found") else {
+            panic!("errors are sent as code");
+        };
+        assert_eq!(with_cmd, "ls: x: file not found");
+        let Formatted::Code(bare) = error(None, "boom") else {
+            panic!("errors are sent as code");
+        };
+        assert_eq!(bare, "boom");
+    }
 }

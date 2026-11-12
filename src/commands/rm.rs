@@ -22,12 +22,10 @@ pub async fn handle(
 ) -> BotResult<()> {
     let mut cn = pool.get()?;
     for path in paths {
-        match files::remove(&mut cn, connected_chat_id, user_id, &path, recursive) {
-            Ok(_) => {}
-            Err(err) => {
-                bot.send_code(chat_id, format!("rm: {}", err))
-                    .await?;
-            }
+        // One failing path should not stop the others, so each is reported
+        // on its own instead of bailing out with `?`.
+        if let Err(err) = files::remove(&mut cn, connected_chat_id, user_id, &path, recursive) {
+            report_error(&bot, chat_id, "rm", &err.into()).await;
         }
     }
     Ok(())

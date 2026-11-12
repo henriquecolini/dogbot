@@ -50,17 +50,19 @@ pub async fn handle(
                         Err(diesel::result::Error::DatabaseError(
                             diesel::result::DatabaseErrorKind::UniqueViolation,
                             _,
-                        )) => "key: already registered".to_string(),
-                        Err(err) => format!("key: {err}"),
+                        )) => return Err(BotError::user("already registered")),
+                        Err(err) => return Err(err.into()),
                     }
                 }
-                Err(err) => format!("key: not a valid public key: {err}"),
+                Err(err) => {
+                    return Err(BotError::user(format!("not a valid public key: {err}")));
+                }
             }
         }
         KeyAction::List => {
             let keys = model::SshKey::list(&mut cn, user_id)?;
             if keys.is_empty() {
-                "key: no keys registered".to_string()
+                return Err(BotError::user("no keys registered"));
             } else {
                 keys.iter()
                     .enumerate()
@@ -83,7 +85,7 @@ pub async fn handle(
                     model::SshKey::delete(&mut cn, user_id, key.id)?;
                     format!("key removed: {}", key.fingerprint)
                 }
-                None => format!("key: no key at position {index}"),
+                None => return Err(BotError::user(format!("no key at position {index}"))),
             }
         }
     };

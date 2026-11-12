@@ -76,6 +76,15 @@ pub enum Command {
     Download(DownloadCommand),
 }
 
+impl Command {
+    /// The name the user typed, e.g. `ls`; the variant's name in lowercase.
+    pub fn name(&self) -> String {
+        let debug = format!("{self:?}");
+        let end = debug.find(['(', ' ']).unwrap_or(debug.len());
+        debug[..end].to_lowercase()
+    }
+}
+
 fn parse_args<T: Parser>(input: String) -> Result<(T,), ParseError> {
     let Some(args) = shlex::split(&input) else {
         return Err(ParseError::IncorrectFormat(

@@ -136,10 +136,10 @@ pub async fn handle(
     };
     let text: Formatted = match result {
         Ok(Ok(output)) => raw(output),
-        Ok(Err(err)) => code(err),
+        Ok(Err(err)) => error(None, err),
         Err(err) => {
             error!("Script task failed: {err}");
-            code("The bot failed to run the script.")
+            error(None, "The bot failed to run the script.")
         }
     };
 
@@ -172,7 +172,7 @@ async fn send_reply(bot: &Bot, pool: &PgPool, chat_id: ChatId, text: Formatted) 
         }
         Err(err) => {
             error!("Failed to send message: {err}");
-            let _ = bot.send_formatted(chat_id, code(err.to_string())).await;
+            let _ = bot.send_error(chat_id, None, err).await;
         }
     };
     Ok(())
