@@ -1,5 +1,6 @@
 //! An SSH server exposing each chat's emulated filesystem over SFTP, so it can
-//! be mounted with `sshfs` and edited with ordinary tools.
+//! be mounted with `sshfs` and edited with ordinary tools, and a console
+//! (`ssh chat@host`) that runs the chat's `main.dog` from a terminal.
 //!
 //! Authentication mirrors the `/connect` command: the SSH **username** names
 //! the chat, and the **public key** identifies the user. A session is only
@@ -11,6 +12,7 @@
 //! someone whose key was refused. Passwords are not offered at all, so nobody is
 //! ever asked for one that doesn't exist.
 
+mod console;
 mod fs;
 
 #[cfg(test)]
@@ -21,9 +23,9 @@ use fs::DogFs;
 use log::*;
 use russh::keys::{Algorithm, HashAlg, PrivateKey, PublicKey};
 use russh::server::{Auth, ChannelOpenHandle, Config, Msg, Server as _, Session};
-use russh::{Channel, ChannelId, MethodKind, MethodSet};
+use russh::{Channel, ChannelId, MethodKind, MethodSet, Pty};
 use std::borrow::Cow;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -147,6 +149,8 @@ impl russh::server::Server for SftpServer {
             refusal: None,
             explained: false,
             channels: Arc::new(Mutex::new(HashMap::new())),
+            ptys: HashSet::new(),
+            consoles: HashSet::new(),
         }
     }
 }
@@ -163,6 +167,10 @@ struct SshSession {
     /// up to three times, and once is enough.
     explained: bool,
     channels: Arc<Mutex<HashMap<ChannelId, Channel<Msg>>>>,
+    /// Channels that asked for a terminal, so their console echoes and edits.
+    ptys: HashSet<ChannelId>,
+    /// Channels running a console, which reads its own end-of-input.
+    consoles: HashSet<ChannelId>,
 }
 
 /// Why a key did not get in. Ordered from least to most specific: a key we
@@ -305,11 +313,78 @@ impl russh::server::Handler for SshSession {
         channel: ChannelId,
         session: &mut Session,
     ) -> Result<(), Self::Error> {
-        // The SFTP subsystem is done, as a real `sftp-server` would be when
-        // its input ends. `scp` treats a channel that closes without an
-        // exit status as a failure, even after a good transfer.
-        session.exit_status_request(channel, 0)?;
-        session.close(channel)?;
+        // A console reads end-of-input itself: piped messages still have to be
+        // answered after stdin closes.
+        if !self.consoles.contains(&channel) {
+            // The SFTP subsystem is done, as a real `sftp-server` would be when
+            // its input ends. `scp` treats a channel that closes without an
+            // exit status as a failure, even after a good transfer.
+            session.exit_status_request(channel, 0)?;
+            session.close(channel)?;
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn pty_request(
+        &mut self,
+        channel: ChannelId,
+        _term: &str,
+        _col_width: u32,
+        _row_height: u32,
+        _pix_width: u32,
+        _pix_height: u32,
+        _modes: &[(Pty, u32)],
+        session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        self.ptys.insert(channel);
+        session.channel_success(channel)?;
+        Ok(())
+    }
+
+    /// `ssh chat@host`: the interactive console, or one message per line of
+    /// stdin when there is no terminal.
+    async fn shell_request(
+        &mut self,
+        channel_id: ChannelId,
+        session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        let Some(console) = self.console(channel_id, session) else {
+            session.channel_failure(channel_id)?;
+            return Ok(());
+        };
+        let Some(channel) = self.channels.lock().await.remove(&channel_id) else {
+            session.channel_failure(channel_id)?;
+            return Ok(());
+        };
+        self.consoles.insert(channel_id);
+        session.channel_success(channel_id)?;
+        // Spawned: the session must keep reading, or the console would never
+        // see what is typed into it.
+        tokio::spawn(console::shell(console, channel));
+        Ok(())
+    }
+
+    /// `ssh chat@host 'message'`: runs one message and exits with its status.
+    async fn exec_request(
+        &mut self,
+        channel_id: ChannelId,
+        data: &[u8],
+        session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        let Some(console) = self.console(channel_id, session) else {
+            session.channel_failure(channel_id)?;
+            return Ok(());
+        };
+        // The message is the command line, so stdin is read and thrown away:
+        // left unread, a client piping something large would stall the session.
+        if let Some(mut channel) = self.channels.lock().await.remove(&channel_id) {
+            tokio::spawn(async move { while channel.wait().await.is_some() {} });
+        }
+        self.consoles.insert(channel_id);
+        session.channel_success(channel_id)?;
+        let command = String::from_utf8_lossy(data).into_owned();
+        tokio::spawn(console::exec(console, command));
         Ok(())
     }
 
@@ -325,7 +400,6 @@ impl russh::server::Handler for SshSession {
         };
 
         if name != "sftp" {
-            // No shell, no exec: this server only serves files.
             session.channel_failure(channel_id)?;
             return Ok(());
         }
@@ -339,5 +413,22 @@ impl russh::server::Handler for SshSession {
         let handler = DogFs::new(self.pool.clone(), user_id, chat_id);
         russh_sftp::server::run(channel.into_stream(), handler).await;
         Ok(())
+    }
+}
+
+impl SshSession {
+    /// A console for `channel`, as the authenticated user.
+    fn console(&self, channel: ChannelId, session: &Session) -> Option<console::Console> {
+        let (user_id, chat_id) = self.identity?;
+        Some(console::Console {
+            pool: self.pool.clone(),
+            user_id,
+            chat_id,
+            out: console::Out {
+                handle: session.handle(),
+                id: channel,
+                pty: self.ptys.contains(&channel),
+            },
+        })
     }
 }

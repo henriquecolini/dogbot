@@ -572,7 +572,7 @@ async fn an_idle_session_survives_past_the_inactivity_timeout() {
 }
 
 // ---------------------------------------------------------------------------
-// Logging in: what a refused client is told.
+// The console: `ssh chat@host` and `ssh chat@host 'message'`.
 // ---------------------------------------------------------------------------
 
 /// A server, plus the pool and chat behind it, for tests that set up files
@@ -604,6 +604,173 @@ macro_rules! console_test {
             return;
         };
     };
+}
+
+async fn login(
+    port: u16,
+    username: &str,
+    key: &russh::keys::PrivateKey,
+) -> russh::client::Handle<AcceptAnyServer> {
+    let config = Arc::new(russh::client::Config::default());
+    let mut session = russh::client::connect(config, ("127.0.0.1", port), AcceptAnyServer)
+        .await
+        .unwrap();
+    let auth = session
+        .authenticate_publickey(
+            username,
+            russh::keys::PrivateKeyWithHashAlg::new(
+                Arc::new(key.clone()),
+                Some(russh::keys::HashAlg::Sha512),
+            ),
+        )
+        .await
+        .unwrap();
+    assert!(auth.success(), "login refused");
+    session
+}
+
+/// What a console channel printed, and how it ended.
+#[derive(Debug, Default)]
+struct Ran {
+    stdout: String,
+    stderr: String,
+    status: Option<u32>,
+}
+
+async fn collect(mut channel: russh::Channel<russh::client::Msg>) -> Ran {
+    let mut ran = Ran::default();
+    let deadline = tokio::time::Duration::from_secs(20);
+    while let Ok(Some(msg)) = tokio::time::timeout(deadline, channel.wait()).await {
+        match msg {
+            russh::ChannelMsg::Data { data } => ran.stdout.push_str(&String::from_utf8_lossy(&data)),
+            russh::ChannelMsg::ExtendedData { data, ext: 1 } => {
+                ran.stderr.push_str(&String::from_utf8_lossy(&data))
+            }
+            russh::ChannelMsg::ExitStatus { exit_status } => ran.status = Some(exit_status),
+            russh::ChannelMsg::Close => break,
+            _ => {}
+        }
+    }
+    ran
+}
+
+/// `ssh alias@host 'command'`.
+async fn exec(port: u16, alias: &str, key: &russh::keys::PrivateKey, command: &str) -> Ran {
+    let session = login(port, alias, key).await;
+    let channel = session.channel_open_session().await.unwrap();
+    channel.exec(true, command).await.unwrap();
+    collect(channel).await
+}
+
+fn write_script(pool: &PgPool, chat: ChatId, path: &str, body: &str) {
+    let mut cn = pool.get().unwrap();
+    files::write(&mut cn, chat, USER, path, body.as_bytes()).unwrap();
+    files::set_mode(&mut cn, chat, USER, path, 0o750).unwrap();
+}
+
+#[tokio::test]
+async fn a_message_over_ssh_runs_main_dog() {
+    console_test!(port, alias, key, pool, chat);
+    crate::commands::init::init(&mut pool.get().unwrap(), chat, USER, None).unwrap();
+
+    let ran = exec(port, &alias, &key, "ping").await;
+    assert_eq!((ran.stdout.as_str(), ran.status), ("pong\n", Some(0)), "{ran:?}");
+
+    // The files are the chat's real ones: state carries between runs.
+    let first = exec(port, &alias, &key, "count").await;
+    let second = exec(port, &alias, &key, "count").await;
+    assert_eq!(first.stdout, "I've counted to 1.\n");
+    assert_eq!(second.stdout, "I've counted to 2.\n");
+
+    // A message the starter doesn't answer is silent, and still a success.
+    let ran = exec(port, &alias, &key, "something else").await;
+    assert_eq!((ran.stdout.as_str(), ran.status), ("", Some(0)));
+}
+
+#[tokio::test]
+async fn exit_statuses_tell_failure_from_nothing_to_run() {
+    console_test!(port, alias, key, pool, chat);
+
+    let ran = exec(port, &alias, &key, "hi").await;
+    assert_eq!(ran.status, Some(2), "{ran:?}");
+    assert!(ran.stderr.contains("/init"), "{ran:?}");
+
+    write_script(&pool, chat, "main.dog", "fail boom");
+    let ran = exec(port, &alias, &key, "hi").await;
+    assert_eq!(ran.status, Some(1), "{ran:?}");
+    assert!(ran.stderr.contains("boom"), "{ran:?}");
+    assert!(ran.stdout.is_empty(), "errors go to stderr: {ran:?}");
+}
+
+#[tokio::test]
+async fn sends_and_edits_are_printed_not_posted() {
+    console_test!(port, alias, key, pool, chat);
+    write_script(
+        &pool,
+        chat,
+        "main.dog",
+        "use send_id, edit from mod bot; id = { send_id working }; edit $id done; put \"reply to $message\"",
+    );
+    let ran = exec(port, &alias, &key, "go").await;
+    assert_eq!(
+        ran.stdout, "[#1] working\n[#1 edited] done\nreply to go\n",
+        "{ran:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_piped_shell_runs_one_message_per_line() {
+    console_test!(port, alias, key, pool, chat);
+    write_script(&pool, chat, "main.dog", "put \"<$message>\"");
+
+    let session = login(port, &alias, &key).await;
+    let channel = session.channel_open_session().await.unwrap();
+    channel.request_shell(true).await.unwrap();
+    channel.data(&b"one\ntwo\n\nthree"[..]).await.unwrap();
+    channel.eof().await.unwrap();
+    let ran = collect(channel).await;
+    // No prompt or banner without a terminal; blank lines are skipped and a
+    // last line without a newline still counts.
+    assert_eq!(ran.stdout, "<one>\n<two>\n<three>\n", "{ran:?}");
+    assert_eq!(ran.status, Some(0));
+}
+
+#[tokio::test]
+async fn a_terminal_gets_a_prompt_and_echo() {
+    console_test!(port, alias, key, pool, chat);
+    write_script(&pool, chat, "main.dog", "put \"<$message>\"");
+
+    let session = login(port, &alias, &key).await;
+    let channel = session.channel_open_session().await.unwrap();
+    channel
+        .request_pty(true, "xterm", 80, 24, 0, 0, &[])
+        .await
+        .unwrap();
+    channel.request_shell(true).await.unwrap();
+    channel.data(&b"hey\r\x04"[..]).await.unwrap();
+    let ran = collect(channel).await;
+    assert!(ran.stdout.contains("dogbot console"), "{ran:?}");
+    assert!(ran.stdout.contains(&format!("{alias}> hey\r\n<hey>\r\n")), "{ran:?}");
+    assert_eq!(ran.status, Some(0));
+}
+
+#[tokio::test]
+async fn console_commands() {
+    console_test!(port, alias, key, _pool, _chat);
+    let ran = exec(port, &alias, &key, ":eval pln (1 + 2)").await;
+    assert_eq!((ran.stdout.as_str(), ran.status), ("3\n", Some(0)), "{ran:?}");
+
+    let ran = exec(port, &alias, &key, ":help").await;
+    assert!(ran.stdout.contains(":eval"), "{ran:?}");
+
+    let ran = exec(port, &alias, &key, ":nope").await;
+    assert_eq!(ran.status, Some(1));
+
+    // Tools that expect a Unix shell are told what to use instead of having
+    // their protocol run as a message.
+    let ran = exec(port, &alias, &key, "scp -t /main.dog").await;
+    assert_eq!(ran.status, Some(127));
+    assert!(ran.stderr.contains("scp -s"), "{ran:?}");
 }
 
 /// Logs in with `key`, expecting refusal, then asks keyboard-interactive for
