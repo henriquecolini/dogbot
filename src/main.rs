@@ -266,6 +266,13 @@ async fn extract_maybe_command(
     match Command::parse(&message_content, &bot_name) {
         Ok(command) => Some(MaybeCommand::Command(command)),
         Err(ParseError::WrongBotName(_)) => None,
+        // Unknown commands only get an error when explicitly addressed to this
+        // bot (`/blah@bot_name`); otherwise they may belong to another bot.
+        Err(ParseError::UnknownCommand(_))
+            if !is_addressed_to(&message_content, &bot_name) =>
+        {
+            None
+        }
         Err(err) => {
             if let Err(err) = bot.send_code(chat_id, err.to_string()).await {
                 error!("Failed to send error message: {}", err);
@@ -273,6 +280,15 @@ async fn extract_maybe_command(
             None
         }
     }
+}
+
+/// Whether the leading `/command` token carries an `@bot_name` suffix for this bot.
+fn is_addressed_to(message_content: &str, bot_name: &str) -> bool {
+    message_content
+        .split_whitespace()
+        .next()
+        .and_then(|token| token.split_once('@'))
+        .is_some_and(|(_, name)| name.eq_ignore_ascii_case(bot_name))
 }
 
 fn filter_map_command(maybe_command: MaybeCommand) -> Option<Command> {
