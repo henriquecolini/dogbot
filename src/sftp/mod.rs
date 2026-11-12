@@ -296,6 +296,10 @@ impl russh::server::Handler for SshSession {
         channel: ChannelId,
         session: &mut Session,
     ) -> Result<(), Self::Error> {
+        // The SFTP subsystem is done, as a real `sftp-server` would be when
+        // its input ends. `scp` treats a channel that closes without an
+        // exit status as a failure, even after a good transfer.
+        session.exit_status_request(channel, 0)?;
         session.close(channel)?;
         Ok(())
     }
