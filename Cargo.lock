@@ -833,7 +833,7 @@ dependencies = [
 [[package]]
 name = "dog4"
 version = "0.1.0"
-source = "git+https://github.com/henriquecolini/dog4.git?rev=192c4a92cc79544f4bd8b321a19fb555efd1a999#192c4a92cc79544f4bd8b321a19fb555efd1a999"
+source = "git+https://github.com/henriquecolini/dog4.git?rev=f191b2a3ef713a27903de847aba9cd3427ea98b8#f191b2a3ef713a27903de847aba9cd3427ea98b8"
 dependencies = [
  "indexmap 2.14.0",
  "minreq",
