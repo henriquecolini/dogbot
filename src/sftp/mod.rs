@@ -5,6 +5,11 @@
 //! the chat, and the **public key** identifies the user. A session is only
 //! granted when that user is already a member of that chat, and every
 //! filesystem operation then runs under their existing permission bits.
+//!
+//! A login that fails is told why, through keyboard-interactive: OpenSSH shows
+//! that method's instructions, which makes it the one way to get a message to
+//! someone whose key was refused. Passwords are not offered at all, so nobody is
+//! ever asked for one that doesn't exist.
 
 mod fs;
 
@@ -16,7 +21,8 @@ use fs::DogFs;
 use log::*;
 use russh::keys::{Algorithm, PrivateKey, PublicKey};
 use russh::server::{Auth, ChannelOpenHandle, Config, Msg, Server as _, Session};
-use russh::{Channel, ChannelId};
+use russh::{Channel, ChannelId, MethodKind, MethodSet};
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -105,6 +111,7 @@ async fn run_with_timings(
         keepalive_interval: Some(keepalive),
         keepalive_max: KEEPALIVE_MAX,
         keys: vec![host_key],
+        methods: MethodSet::from(&[MethodKind::PublicKey, MethodKind::KeyboardInteractive][..]),
         ..Default::default()
     };
 
@@ -128,6 +135,8 @@ impl russh::server::Server for SftpServer {
             pool: self.pool.clone(),
             peer,
             identity: None,
+            refusal: None,
+            explained: false,
             channels: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -138,8 +147,53 @@ struct SshSession {
     peer: Option<SocketAddr>,
     /// Set once authentication succeeds.
     identity: Option<(UserId, ChatId)>,
+    /// Why the most telling key so far was refused, to explain once the client
+    /// runs out of keys.
+    refusal: Option<Refusal>,
+    /// Whether the refusal has been shown. OpenSSH retries keyboard-interactive
+    /// up to three times, and once is enough.
+    explained: bool,
     channels: Arc<Mutex<HashMap<ChannelId, Channel<Msg>>>>,
 }
+
+/// Why a key did not get in. Ordered from least to most specific: a key we
+/// know says more about what went wrong than one we don't, so it wins when a
+/// client offers several.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum Refusal {
+    UnknownKey { fingerprint: String },
+    NoSuchChat { chat: String },
+    NotAMember { chat: String },
+}
+
+impl Refusal {
+    fn explain(&self) -> String {
+        match self {
+            Refusal::UnknownKey { fingerprint } => format!(
+                "dogbot doesn't know your key ({fingerprint}).\n\
+                 Register it by sending the bot, on Telegram:\n\
+                 \n    /key add github:<your GitHub username>\n\
+                 \nor /key add followed by the contents of your public key file\n\
+                 (e.g. ~/.ssh/id_ed25519.pub). Then try again."
+            ),
+            Refusal::NoSuchChat { chat } => format!(
+                "dogbot has no chat called {chat:?}.\n\
+                 The SSH username is a chat's hostname (set with /hostname). Send /mount\n\
+                 in the chat you want and it prints the exact command."
+            ),
+            Refusal::NotAMember { chat } => format!(
+                "Your key is fine, but you haven't talked in {chat:?} yet.\n\
+                 Send any message in that chat first: that's how dogbot learns you belong there."
+            ),
+        }
+    }
+}
+
+/// The help no-one asked for: no key was offered at all.
+const NO_KEY_OFFERED: &str = "dogbot only accepts SSH keys, and your client didn't offer one.\n\
+Create one with `ssh-keygen -t ed25519`, register it by sending the bot\n\
+/key add github:<your GitHub username> (or the contents of ~/.ssh/id_ed25519.pub),\n\
+then try again.";
 
 impl russh::server::Handler for SshSession {
     type Error = anyhow::Error;
@@ -155,29 +209,31 @@ impl russh::server::Handler for SshSession {
         let username = user.to_string();
         let pool = self.pool.clone();
 
-        let resolved = tokio::task::spawn_blocking(move || -> anyhow::Result<Option<(UserId, ChatId)>> {
+        let resolved = tokio::task::spawn_blocking(move || -> anyhow::Result<Result<(UserId, ChatId), Refusal>> {
             let mut cn = pool.get()?;
 
             let Some(key) = model::SshKey::find_by_fingerprint(&mut cn, &fingerprint)? else {
-                return Ok(None);
+                return Ok(Err(Refusal::UnknownKey { fingerprint }));
             };
             let user_id = UserId(key.user_id as u64);
 
+            // Only a registered key learns whether a chat exists, the same
+            // thing `/connect` tells any user.
             let Some(chat) = model::Chat::find(&mut cn, parse_username(&username))? else {
-                return Ok(None);
+                return Ok(Err(Refusal::NoSuchChat { chat: username }));
             };
             let chat_id = chat.id();
 
             // Membership is the gate, exactly as it is for `/connect`.
             if !model::UserInChat::exists(&mut cn, user_id, chat_id)? {
-                return Ok(None);
+                return Ok(Err(Refusal::NotAMember { chat: username }));
             }
-            Ok(Some((user_id, chat_id)))
+            Ok(Ok((user_id, chat_id)))
         })
         .await??;
 
         match resolved {
-            Some((user_id, chat_id)) => {
+            Ok((user_id, chat_id)) => {
                 info!(
                     "SFTP auth accepted: user {} on chat {} from {:?}",
                     user_id.0, chat_id.0, self.peer
@@ -185,11 +241,38 @@ impl russh::server::Handler for SshSession {
                 self.identity = Some((user_id, chat_id));
                 Ok(Auth::Accept)
             }
-            None => {
-                warn!("SFTP auth rejected for {user:?} from {:?}", self.peer);
+            Err(refusal) => {
+                warn!("SFTP auth rejected for {user:?} from {:?}: {refusal:?}", self.peer);
+                if self.refusal.as_ref().is_none_or(|seen| refusal > *seen) {
+                    self.refusal = Some(refusal);
+                }
                 Ok(Auth::reject())
             }
         }
+    }
+
+    /// Never lets anyone in: it exists to tell a refused client why, once its
+    /// keys have run out. The first round shows the explanation with no
+    /// prompts; the client answers with nothing, and is refused.
+    async fn auth_keyboard_interactive<'a>(
+        &'a mut self,
+        _user: &str,
+        _submethods: &str,
+        response: Option<russh::server::Response<'a>>,
+    ) -> Result<Auth, Self::Error> {
+        if response.is_some() || self.explained {
+            return Ok(Auth::reject());
+        }
+        self.explained = true;
+        let explanation = match &self.refusal {
+            Some(refusal) => refusal.explain(),
+            None => NO_KEY_OFFERED.to_string(),
+        };
+        Ok(Auth::Partial {
+            name: Cow::Borrowed(""),
+            instructions: Cow::Owned(explanation),
+            prompts: Cow::Borrowed(&[]),
+        })
     }
 
     /// Passwords are never accepted; a registered key is the only way in.

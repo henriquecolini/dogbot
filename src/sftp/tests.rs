@@ -570,3 +570,95 @@ async fn an_idle_session_survives_past_the_inactivity_timeout() {
         .await
         .expect("the session must still be alive after sitting idle");
 }
+
+// ---------------------------------------------------------------------------
+// Logging in: what a refused client is told.
+// ---------------------------------------------------------------------------
+
+/// A server, plus the pool and chat behind it, for tests that set up files
+/// before connecting.
+async fn console_harness() -> Option<(u16, String, russh::keys::PrivateKey, PgPool, ChatId)> {
+    let (pool, alias, key) = seeded_pool().await?;
+    let chat = {
+        let mut cn = pool.get().unwrap();
+        model::Chat::find(&mut cn, ChatAddress::Alias(&alias))
+            .unwrap()
+            .unwrap()
+            .id()
+    };
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server_pool = pool.clone();
+    tokio::spawn(async move {
+        if let Err(err) = super::run_on_listener(server_pool, listener).await {
+            eprintln!("sftp server error: {err}");
+        }
+    });
+    Some((port, alias, key, pool, chat))
+}
+
+macro_rules! console_test {
+    ($port:ident, $alias:ident, $key:ident, $pool:ident, $chat:ident) => {
+        let Some(($port, $alias, $key, $pool, $chat)) = console_harness().await else {
+            eprintln!("skipping: TEST_DATABASE_URL not set");
+            return;
+        };
+    };
+}
+
+/// Logs in with `key`, expecting refusal, then asks keyboard-interactive for
+/// the explanation an OpenSSH client would print.
+async fn refusal_for(port: u16, username: &str, key: &russh::keys::PrivateKey) -> String {
+    let config = Arc::new(russh::client::Config::default());
+    let mut session = russh::client::connect(config, ("127.0.0.1", port), AcceptAnyServer)
+        .await
+        .unwrap();
+    let auth = session
+        .authenticate_publickey(
+            username,
+            russh::keys::PrivateKeyWithHashAlg::new(
+                Arc::new(key.clone()),
+                Some(russh::keys::HashAlg::Sha512),
+            ),
+        )
+        .await
+        .unwrap();
+    assert!(!auth.success());
+    match session
+        .authenticate_keyboard_interactive_start(username, None)
+        .await
+        .unwrap()
+    {
+        russh::client::KeyboardInteractiveAuthResponse::InfoRequest { instructions, prompts, .. } => {
+            assert!(prompts.is_empty(), "nothing is ever asked for");
+            // Answering with nothing still doesn't get in.
+            let after = session
+                .authenticate_keyboard_interactive_respond(vec![])
+                .await
+                .unwrap();
+            assert!(matches!(
+                after,
+                russh::client::KeyboardInteractiveAuthResponse::Failure { .. }
+            ));
+            instructions
+        }
+        other => panic!("expected an explanation, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn a_refused_login_is_told_why() {
+    console_test!(port, alias, key, _pool, _chat);
+
+    let stranger =
+        russh::keys::PrivateKey::random(&mut rand::rng(), russh::keys::Algorithm::Ed25519).unwrap();
+    let why = refusal_for(port, &alias, &stranger).await;
+    assert!(why.contains("/key add"), "{why}");
+
+    let why = refusal_for(port, "no-such-chat-anywhere", &key).await;
+    assert!(why.contains("no chat called"), "{why}");
+
+    // An unknown key doesn't learn whether the chat exists.
+    let why = refusal_for(port, "no-such-chat-anywhere", &stranger).await;
+    assert!(why.contains("/key add") && !why.contains("no chat"), "{why}");
+}
