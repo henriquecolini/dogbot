@@ -701,3 +701,10 @@ fn the_readme_progress_example_runs() {
         ]
     );
 }
+
+#[test]
+fn a_chat_without_main_dog_says_how_to_make_one() {
+    script_test!(h);
+    let err = load_main(&mut h.pool.get().unwrap(), h.chat, USER).unwrap_err();
+    assert!(explain_missing(&err).unwrap().contains("/init"));
+}

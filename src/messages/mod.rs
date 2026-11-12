@@ -1,8 +1,9 @@
-mod courier;
+pub mod courier;
 mod provider;
 mod runtime;
 
 use crate::prelude::*;
+pub use courier::Courier;
 use dog4::{Builder, Capability, Limits, OutputBuffer, Value};
 use log::*;
 use provider::DogbotProvider;
@@ -16,8 +17,8 @@ use teloxide::prelude::*;
 use tokio::time::interval;
 
 /// Per-chat settings, read from `config/bot.json`.
-#[derive(Deserialize, Clone)]
-struct Config {
+#[derive(Deserialize, Clone, Debug)]
+pub struct Config {
     #[serde(default = "default_timeout")]
     timeout: f32,
     /// Whether scripts may make outbound HTTP requests.
@@ -53,6 +54,7 @@ pub async fn handle(
     Context {
         connected_chat_id,
         chat_id,
+        chat_is_private,
         user_id,
         message_content,
         user_full_name,
@@ -63,18 +65,23 @@ pub async fn handle(
 ) -> BotResult<()> {
     let mut cn = pool.get()?;
 
-    let config: Config = files::read(&mut cn, connected_chat_id, user_id, "config/bot.json")
-        .ok()
-        .and_then(|(_, v)| serde_json::from_slice(&v).ok())
-        .unwrap_or_default();
-
-    // A chat with no executable main.dog is simply inert.
-    let Ok((_, source)) =
-        files::read_for_execution(&mut cn, connected_chat_id, user_id, "main.dog")
-    else {
-        return Ok(());
+    let (source, config) = match load_main(&mut cn, connected_chat_id, user_id) {
+        Ok(found) => found,
+        Err(err) => {
+            // A group whose bot has nothing to say stays quiet: it may simply
+            // not be set up, and a reply to every message would be noise. A
+            // private chat is someone talking to the bot directly, wondering
+            // why it doesn't answer.
+            if let Some(why) = explain_missing(&err) {
+                if chat_is_private && !message_content.is_empty() {
+                    bot.send_html(chat_id, why).await?;
+                }
+            } else {
+                error!("Could not load main.dog: {err}");
+            }
+            return Ok(());
+        }
     };
-    let source = String::from_utf8_lossy(&source).into_owned();
     drop(cn);
 
     let typer = {
@@ -89,57 +96,45 @@ pub async fn handle(
         })
     };
 
-    // dog4's Runtime is synchronous and not Send, so the whole run happens on a
-    // blocking thread. Diesel is blocking too, which makes this the correct
-    // place for the natives to reach the database.
-    let script_pool = pool.clone();
     let ctx = ScriptContext {
         message: message_content,
         sender: user_full_name,
         reply: reply_to_content.unwrap_or_default(),
         reply_from: reply_to_from.unwrap_or_default(),
     };
-    let (script_config, script_ctx) = (config.clone(), ctx.clone());
     // Messages go to the chat the message came from, even when the script runs
     // against another chat's files via `/connect`.
-    let courier = Arc::new(courier::TelegramCourier {
+    let courier: Arc<dyn Courier> = Arc::new(courier::TelegramCourier {
         bot: bot.clone(),
         pool: pool.clone(),
         chat_id,
         handle: tokio::runtime::Handle::current(),
     });
-    let script_courier = courier.clone();
-    let result = tokio::task::spawn_blocking(move || {
-        let later = runtime::Later::default();
-        let hooks = Hooks {
-            later: Some(later.clone()),
-            courier: Some(script_courier),
-        };
-        let output = run_script(
-            script_pool,
-            connected_chat_id,
-            user_id,
-            &source,
-            &script_config,
-            &script_ctx,
-            hooks,
-        );
-        (output, later.take())
-    })
-    .await;
+    // dog4's Runtime is synchronous and not Send, so the whole run happens on a
+    // blocking thread. Diesel is blocking too, which makes this the correct
+    // place for the natives to reach the database.
+    let result = {
+        let (pool, config, ctx, courier) = (pool.clone(), config.clone(), ctx.clone(), courier.clone());
+        tokio::task::spawn_blocking(move || {
+            run_message(pool, connected_chat_id, user_id, &source, &config, &ctx, courier)
+        })
+        .await
+    };
 
     typer.abort();
 
-    let (result, later) = match result {
-        Ok((output, later)) => (Ok(output), later),
-        Err(err) => (Err(err), Vec::new()),
-    };
-    let text: Formatted = match result {
-        Ok(Ok(output)) => raw(output),
-        Ok(Err(err)) => error(None, err),
+    let (text, later) = match result {
+        Ok(Run { output: Ok(output), later }) => (raw(output), later),
+        Ok(Run { output: Err(err), later }) => {
+            let text = match group_tip(&pool, chat_id, chat_is_private, connected_chat_id) {
+                Some(tip) => error_with_tip(err, tip),
+                None => error(None, err),
+            };
+            (text, later)
+        }
         Err(err) => {
             error!("Script task failed: {err}");
-            error(None, "The bot failed to run the script.")
+            (error(None, "The bot failed to run the script."), Vec::new())
         }
     };
 
@@ -149,6 +144,76 @@ pub async fn handle(
     // upkeep it asked for is usually independent of whatever went wrong.
     run_later(courier, pool, connected_chat_id, user_id, later, config, ctx);
     sent
+}
+
+/// Loads what a message runs: the chat's `main.dog`, as `user_id` may run it,
+/// and the chat's configuration.
+pub fn load_main(
+    cn: &mut PgConnection,
+    chat_id: ChatId,
+    user_id: UserId,
+) -> Result<(String, Config), files::FileError> {
+    let config = load_config(cn, chat_id, user_id);
+    let (_, source) = files::read_for_execution(cn, chat_id, user_id, "main.dog")?;
+    Ok((String::from_utf8_lossy(&source).into_owned(), config))
+}
+
+/// The chat's `config/bot.json`, or the defaults when it is missing or broken.
+pub fn load_config(cn: &mut PgConnection, chat_id: ChatId, user_id: UserId) -> Config {
+    files::read(cn, chat_id, user_id, "config/bot.json")
+        .ok()
+        .and_then(|(_, v)| serde_json::from_slice(&v).ok())
+        .unwrap_or_default()
+}
+
+/// Why `load_main` found nothing to run, worded for the person who expected an
+/// answer, as HTML. `None` for a failure that is the bot's, not theirs.
+pub fn explain_missing(err: &files::FileError) -> Option<String> {
+    use files::FileError::*;
+    match err {
+        FileNotFound(_) => Some(
+            "This chat has no <code>main.dog</code> yet, so I have nothing to answer with.\n\n\
+             /init writes a starter one. /start explains how this works."
+                .to_string(),
+        ),
+        NotEnoughPermissions(_) => Some(
+            "<code>main.dog</code> is here, but you can't run it: it has to be readable \
+             <i>and</i> executable by whoever sends the message.\n\n\
+             <code>/ls -l main.dog</code> shows its mode. Its owner can fix it with \
+             <code>/chmod u+x main.dog</code>, or <code>/chmod g+rx main.dog</code> so it \
+             answers everyone in a group."
+                .to_string(),
+        ),
+        NotAFile(_) => Some(
+            "<code>main.dog</code> is a directory; it has to be a file.".to_string(),
+        ),
+        QueryError(_) => None,
+        other => Some(escape_html(other.to_string())),
+    }
+}
+
+/// Chats already told how to test a script privately. The tip is for someone
+/// who has just broken their bot in front of everyone; repeating it on every
+/// error would be noise, so it is given once per chat per process.
+static TIPPED: LazyLock<Mutex<HashSet<i64>>> = LazyLock::new(Default::default);
+
+/// The tip to attach to a script error in a group, the first time one happens.
+fn group_tip(pool: &PgPool, chat_id: ChatId, private: bool, target: ChatId) -> Option<String> {
+    if private || !TIPPED.lock().unwrap().insert(chat_id.0) {
+        return None;
+    }
+    // `/connect` takes the hostname, or the numeric id of a chat without one.
+    let address = pool
+        .get()
+        .ok()
+        .and_then(|mut cn| model::Chat::find(&mut cn, ChatAddress::Id(target)).ok().flatten())
+        .and_then(|chat| chat.alias)
+        .unwrap_or_else(|| target.0.to_string());
+    Some(format!(
+        "Tip: debug without an audience. In a private chat with me, \
+         /connect {address} runs this chat's main.dog for you alone; \
+         /mount shows how to do it from a terminal with ssh."
+    ))
 }
 
 /// Sends a script's output, if there is any, and records it in the history.
@@ -190,8 +255,8 @@ static BACKGROUND: LazyLock<Mutex<HashSet<i64>>> = LazyLock::new(Default::defaul
 /// without waiting for them. They see the same globals as the run that queued
 /// them; their output is discarded and their errors only logged, since by now
 /// the reply has been sent.
-fn run_later(
-    courier: Arc<courier::TelegramCourier>,
+pub fn run_later(
+    courier: Arc<dyn Courier>,
     pool: PgPool,
     chat_id: ChatId,
     user_id: UserId,
@@ -235,6 +300,39 @@ fn run_later(
         }
         BACKGROUND.lock().unwrap().remove(&chat_id.0);
     });
+}
+
+/// What running a message produced.
+pub struct Run {
+    /// The reply, or the error report that replaces it.
+    pub output: Result<String, String>,
+    /// Scripts the run queued with `later`, for [`run_later`].
+    pub later: Vec<String>,
+}
+
+/// Runs `source` the way a message runs `main.dog`: able to send through
+/// `courier` and to queue deferred scripts.
+///
+/// Blocking, like [`run_script`].
+pub fn run_message(
+    pool: PgPool,
+    chat_id: ChatId,
+    user_id: UserId,
+    source: &str,
+    config: &Config,
+    ctx: &ScriptContext,
+    courier: Arc<dyn Courier>,
+) -> Run {
+    let later = runtime::Later::default();
+    let hooks = Hooks {
+        later: Some(later.clone()),
+        courier: Some(courier),
+    };
+    let output = run_script(pool, chat_id, user_id, source, config, ctx, hooks);
+    Run {
+        output,
+        later: later.take(),
+    }
 }
 
 /// The four context values a script sees as globals.

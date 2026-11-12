@@ -151,6 +151,15 @@ pub fn error(cmd: Option<&str>, message: impl Display) -> Formatted {
     }
 }
 
+/// A failure, as [`error`] shows one, followed by a line of advice.
+pub fn error_with_tip(message: impl Display, tip: impl AsRef<str>) -> Formatted {
+    Formatted::Html(format!(
+        "<code>{}</code>\n\n<i>{}</i>",
+        escape_html(truncate(message.to_string(), MAX_CODE_CHARS)),
+        escape_html(tip),
+    ))
+}
+
 pub fn html(input: impl AsRef<str>) -> Formatted {
     Formatted::Html(input.as_ref().to_owned())
 }
