@@ -746,6 +746,110 @@ fn a_chat_without_main_dog_says_how_to_make_one() {
     assert!(explain_missing(&err).unwrap().contains("/init"));
 }
 
+// ---------------------------------------------------------------------------
+// The examples in `examples/`, so the gallery can't rot.
+// ---------------------------------------------------------------------------
+
+fn run_example(h: &Harness, source: &str, message: &str, sender: &str, reply: (&str, &str)) -> String {
+    run_script(
+        h.pool.clone(),
+        h.chat,
+        USER,
+        source,
+        &Config::default(),
+        &ScriptContext {
+            message: message.to_string(),
+            sender: sender.to_string(),
+            reply: reply.0.to_string(),
+            reply_from: reply.1.to_string(),
+        },
+        Hooks::default(),
+    )
+    .unwrap_or_else(|err| panic!("{message:?}: {err}"))
+}
+
+#[test]
+fn example_dice() {
+    script_test!(h);
+    let src = include_str!("../../examples/dice.dog");
+    let roll = |m: &str| run_example(&h, src, m, "Ana", ("", ""));
+    let out = roll("roll 2d6");
+    let total: i64 = out.rsplit("= ").next().unwrap().parse().unwrap();
+    assert!((2..=12).contains(&total), "{out}");
+    assert!(roll("roll d20+3").contains(" + 3 = "));
+    assert!(roll("roll 4d6 - 1").contains(" - 1 = "));
+    assert!(roll("roll 0d6").starts_with("I roll"));
+    assert_eq!(roll("hello"), "");
+}
+
+#[test]
+fn example_scoreboard() {
+    script_test!(h);
+    let src = include_str!("../../examples/scoreboard.dog");
+    let say = |who: &str, m: &str| run_example(&h, src, m, who, ("", ""));
+    assert_eq!(say("Ana", "scores"), "Nobody has scored yet. Send: point");
+    assert_eq!(say("Ana", "point"), "Ana has 1 point(s).");
+    say("Bo", "Point");
+    assert_eq!(say("Bo", "point"), "Bo has 2 point(s).");
+    assert_eq!(say("Ana", "scores"), "1. Bo: 2\n2. Ana: 1");
+    assert_eq!(say("Ana", "reset scores"), "Scores cleared.");
+    assert_eq!(say("Ana", "scores"), "Nobody has scored yet. Send: point");
+}
+
+#[test]
+fn example_quotes() {
+    script_test!(h);
+    let src = include_str!("../../examples/quotes.dog");
+    let say = |m: &str, reply: (&str, &str)| run_example(&h, src, m, "Ana", reply);
+    assert!(say("quote", ("", "")).starts_with("No quotes yet"));
+    assert!(say("remember", ("", "")).starts_with("Reply to a message"));
+    assert_eq!(say("remember", ("to be or not", "Bo")), "Saved quote #1.");
+    assert_eq!(say("quote", ("", "")), "“to be or not” — Bo");
+}
+
+#[test]
+fn example_router() {
+    script_test!(h);
+    h.write("lib/commands.dog", include_str!("../../examples/router/lib/commands.dog"));
+    h.make_executable("lib/commands.dog");
+    let src = include_str!("../../examples/router/main.dog");
+    let say = |m: &str| run_example(&h, src, m, "Ana", ("", ""));
+    assert_eq!(say("!help"), "Commands: !help, !echo, !flip, !pick");
+    assert_eq!(say("!echo hi there"), "hi there");
+    assert!(["heads", "tails"].contains(&say("!flip").as_str()));
+    assert!(say("!nope").starts_with("Unknown command !nope"));
+    assert_eq!(say("no bang"), "");
+}
+
+#[test]
+fn example_progress() {
+    script_test!(h);
+    let courier = Arc::new(FakeCourier::default());
+    let out = run_script(
+        h.pool.clone(),
+        h.chat,
+        USER,
+        include_str!("../../examples/progress.dog"),
+        &Config::default(),
+        &ScriptContext {
+            message: "work".into(),
+            sender: "Ana".into(),
+            reply: String::new(),
+            reply_from: String::new(),
+        },
+        Hooks {
+            later: None,
+            courier: Some(courier.clone()),
+        },
+    )
+    .unwrap();
+    assert!(out.starts_with("Done!"), "{out}");
+    let log = courier.log.lock().unwrap();
+    assert_eq!(log.first().unwrap(), "send plain:Working… 0%");
+    assert!(log.contains(&"edit 101 plain:Working… 100%".to_string()), "{log:?}");
+    assert_eq!(log.last().unwrap(), "delete 101");
+}
+
 #[test]
 fn a_refused_init_changes_nothing() {
     script_test!(h);

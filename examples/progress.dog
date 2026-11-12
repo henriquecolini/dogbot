@@ -1,0 +1,17 @@
+// Progress: "work" shows a message that updates itself, then cleans up.
+//
+// Shows: sending messages while the script runs with `send_id`, editing and
+// deleting them, and `sleep`. The script's own output is still the final
+// reply, sent after everything else.
+
+use send_id, edit, delete, sleep from mod bot;
+
+if ({ lower { trim $message } } != work) { return };
+
+id = { send_id "Working… 0%" };
+for pct in [25 50 75 100] {
+    sleep 0.5;
+    edit $id "Working… $pct%";
+};
+delete $id;
+put "Done! (Telegram limits bots to about one edit a second per chat, so real work should update less often.)"

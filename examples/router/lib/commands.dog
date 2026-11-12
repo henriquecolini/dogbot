@@ -1,0 +1,15 @@
+// The commands `main.dog` dispatches to. Each takes the words after the
+// command name and gives the reply. `pub` is what other files can `use`.
+
+pub commands = [
+    help = fn (args: arr) {
+        put "Commands: !$({ join { keys $commands } ", !" })"
+    },
+    echo = fn (args: arr) {
+        put (if $args { join $args " " } else "Echo what? !echo some text")
+    },
+    flip = fn (args: arr) { pick [heads tails] },
+    pick = fn (args: arr) {
+        put (if $args { pick $args } else "Pick from what? !pick pizza sushi tacos")
+    },
+];

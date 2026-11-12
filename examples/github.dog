@@ -1,0 +1,26 @@
+// GitHub: "gh torvalds" replies with a summary of that GitHub account.
+//
+// Shows: calling a JSON API with `fetch`, handling a status yourself instead
+// of letting `get` raise, and HTML replies with `send`. Needs `"net": true`
+// in config/bot.json (the default).
+
+use send from mod bot;
+
+m = { captures $message """^gh\s+([A-Za-z0-9-]{1,39})$""" };
+if (!$m) { return };
+user = $m[1];
+
+// GitHub's API wants a User-Agent. `fetch` returns the whole response, so a
+// 404 is a value to look at rather than an error.
+r = { fetch "https://api.github.com/users/$user" [headers = [User-Agent = dogbot-example]] };
+if ($r.status == 404) { return "No GitHub user called $user." };
+if (!$r.ok) { fail "GitHub answered $r.status" };
+
+u = { json.parse $r.body };
+name = $u.name ?? $u.login;
+bio = $u.bio ?? "no bio";
+
+// Interpolated values go into HTML, so anything a user controls is escaped.
+fn esc (t: str) { put { replace { replace { replace $t "&" "&amp;" } "<" "&lt;" } ">" "&gt;" } }
+
+send "<b>$({ esc $name })</b> — $({ esc $bio })\n$u.public_repos public repos, $u.followers followers\n$u.html_url" html

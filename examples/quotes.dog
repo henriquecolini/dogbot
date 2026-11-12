@@ -1,0 +1,27 @@
+// Quotes: reply to someone's message with "remember" to save it, and send
+// "quote" for a random saved one.
+//
+// Shows: the $reply and $reply_from globals, an array of maps in a JSON file,
+// and `pick`.
+
+use read, write from mod bot;
+
+// Quoted: after `=` dog4 reads an expression, where `/` divides.
+file = "quotes.json";
+text = { lower { trim $message } };
+
+fn load () (try { json.parse({ read $file }) } catch e [])
+
+put (if ($text == remember) {
+    if (!$reply) { return "Reply to a message with \"remember\" to save it." };
+    quotes = { load };
+    // `+` on arrays concatenates, so this appends one map.
+    quotes += [[text = $reply, by = $reply_from]];
+    write $file { json.encode $quotes };
+    put "Saved quote #$({ len $quotes })."
+} else if ($text == quote) {
+    quotes = { load };
+    if (!$quotes) { return "No quotes yet. Reply to a message with \"remember\"." };
+    q = { pick $quotes };
+    put "“$q.text” — $q.by"
+})

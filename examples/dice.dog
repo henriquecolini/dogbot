@@ -1,0 +1,35 @@
+// Dice: "roll 2d6", "roll d20+3", "roll 4d6 - 1". Anything else gets no reply.
+//
+// Shows: regular expressions with captures, `??` and `||` for defaults,
+// turning text into numbers, building an array in a loop, and `random`.
+
+// `captures` gives [whole count sides bonus], or null when nothing matched.
+// A raw string ("""…""") keeps the backslashes the regex needs.
+m = { captures $message """^\s*roll\s+(\d*)d(\d+)\s*([+-]\s*\d+)?\s*$""" };
+
+fn roll (count: num, sides: num, bonus: num) {
+    if ($count < 1 || $count > 100 || $sides < 2) {
+        return "I roll 1 to 100 dice with at least 2 sides each."
+    };
+    // A `for` gives the fold of its iterations: arrays are concatenated, so
+    // `put [x]` each time builds the list. `random a b` excludes b.
+    rolls = for i in (0..$count) { put [{ random 1 ($sides + 1) }] };
+    total = (sum($rolls) + $bonus);
+    shown = { join $rolls " + " };
+    // An `if` used as a statement still runs its branch; only its value is
+    // thrown away, which doesn't matter for an assignment.
+    if ($bonus > 0) {
+        shown = "$shown + $bonus"
+    } else if ($bonus < 0) {
+        shown = "$shown - $(-$bonus)"
+    };
+    put "🎲 $shown = $total"
+}
+
+put (if $m {
+    // An empty count ("d20") means one die; `||` skips the empty string.
+    count = num($m[1] || 1);
+    // The bonus keeps its sign; spaces inside it are dropped first.
+    bonus = num({ replace ($m[3] ?? "0") """[\s+]""" "" });
+    roll $count $m[2] $bonus
+})

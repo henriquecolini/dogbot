@@ -1,0 +1,23 @@
+// Router: "!help", "!echo some text", "!flip", "!pick a b c". Commands live
+// in lib/commands.dog, so adding one never touches this file.
+//
+// Shows: splitting a bot across modules, a map of functions as a dispatch
+// table, slices, and calling a function held in a variable.
+//
+// Copy both files into the chat, keeping the layout:
+//   main.dog
+//   lib/commands.dog
+// Both need read and execute: importing a module runs it.
+
+use commands from mod lib/commands;
+
+// Only messages starting with "!" are commands; the rest get no reply.
+if (!{ starts_with $message "!" }) { return };
+
+// `$message[1..]` drops the "!"; `split` breaks the rest into words.
+words = { split $message[1..] };
+name = $words[0] ?? "";
+handler = $commands[$name];
+
+if (!$handler) { return "Unknown command !$name. Try !help" };
+put ($handler($words[1..]))

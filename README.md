@@ -1,45 +1,113 @@
 # dogbot
 
-A Telegram bot where every chat gets its own filesystem and its own program.
+A Telegram bot you program yourself. Every chat gets its own little Unix
+filesystem and its own program.
 
-Send a message to a chat and the bot runs that chat's `main.dog`, written in
-[dog4](https://github.com/henriquecolini/dog4). The filesystem lives in
-Postgres, has Unix-style ownership and permissions, and can be mounted over
-SFTP so you can edit it from your own machine.
+Send a message to a chat and the bot runs that chat's `main.dog`, a script in
+[dog4](https://github.com/henriquecolini/dog4), and replies with whatever it
+outputs. The filesystem lives in Postgres, has Unix-style ownership and
+permissions, and is reachable over SSH: mount it with sshfs and edit in your
+own editor, or talk to your script from a terminal.
+
+## Quick start
+
+You need Telegram, an SSH key and about five minutes.
+
+1. **Open the bot** in Telegram and press *Start*. In a private chat with the
+   bot, the chat is yours to program. In a group, it belongs to the group.
+2. **`/init myproject`** writes a starter `main.dog` and names the chat
+   `myproject`. Send `ping` and it answers `pong`.
+3. **`/key add github:yourname`** registers the SSH keys on your GitHub
+   account. No GitHub? Paste a key instead: `/key add ssh-ed25519 AAAA… you@laptop`
+   (the contents of `~/.ssh/id_ed25519.pub`; `ssh-keygen -t ed25519` makes one).
+4. **`/mount`** prints the commands for this chat. Add the `Host dogbot`
+   block it shows to `~/.ssh/config` once, then:
+
+   ```sh
+   ssh myproject@dogbot              # a console: type messages, main.dog answers
+   sftp myproject@dogbot             # or browse and copy files
+   sshfs myproject@dogbot:/ ~/mnt/myproject   # or mount it and use your editor
+   ```
+
+5. **Edit `main.dog`** and try it in the console before the chat sees it.
+
+New to dog4? Read [dog4 for people who know Python or
+bash](docs/dog4-cheatsheet.md) first; it's short, and it covers the four things
+that trip everyone up. Then borrow from the [examples](examples/).
+
+## How it fits together
+
+* **A chat is a computer.** It has a filesystem rooted at `/` and one program,
+  `/main.dog`, which runs once for every message that isn't a `/command`.
+* **The SSH username is the chat** (its `/hostname`, or `chat<id>` for a chat
+  without one) **and the key is you.** You can reach a chat only if you've sent
+  a message in it, and you get exactly the access you have there.
+* **Files have owners and `rwx` bits** for owner, group (everyone in the chat)
+  and others (everyone else). `/ls -l` shows them and `/chmod` changes them.
+* **`main.dog` runs as whoever sent the message.** It has to be readable and
+  executable by them, so in a group it needs `g+rx`. `/init` sets mode 750.
 
 ## Chat commands
 
 | command | does |
 |---|---|
+| `/start` | introduces the bot and the steps above |
 | `/help` | lists the commands |
-| `/hostname [name]` | sets a unique name for the chat, used for mounting and cross-chat paths |
+| `/init [name]` | writes a starter `main.dog` and `README.md`; with a name, also sets the hostname |
+| `/hostname [name]` | sets a unique name for the chat: its SSH username and cross-chat prefix |
 | `/connect <chat>` · `/disconnect` | in a private chat, operate on another chat's filesystem |
 | `/ls [-l] [-a] [path]` | list files |
 | `/read <path>` · `/write <path> <text>` | read and write |
 | `/mkdir [-p] <path>` · `/rm [-r] <paths>` · `/mv <src> <dest>` | manage files |
 | `/chmod <clause> <path>` · `/chown <user> <path>` | permissions and ownership |
 | `/upload <path>` · `/download <path>` | transfer files as Telegram documents |
-| `/key add|list|rm` | manage SSH keys for filesystem access |
-| `/mount` | print the `sshfs` command for this chat |
+| `/key add <key \| github:user \| gitlab:user>` · `/key list` · `/key rm <n>` | manage SSH keys |
+| `/mount` | how to reach this chat over SSH |
 | `/id` | show user and chat IDs |
 
-## Mounting a chat's filesystem
+Hostnames are letters, digits, `-`, `_` and `.`, starting with a letter, since
+they become SSH usernames.
 
-Register a public key once, then mount:
+## Reaching a chat over SSH
+
+`/mount` prints all of this with the right names filled in. Once, in
+`~/.ssh/config`:
+
+```
+Host dogbot
+    HostName <the bot's server>
+    Port 2222
+```
+
+The first connection asks you to trust the server's key; `/mount` shows its
+fingerprint so you can check. If a login is refused, the server says why (an
+unregistered key, a chat that doesn't exist, or one you haven't talked in yet)
+instead of asking for a password, because there are none.
+
+### Editing with your own tools
 
 ```sh
-# in Telegram
-/hostname myproject
-/key add ssh-ed25519 AAAAC3Nz... you@laptop
-/mount
-
-# on your machine
-sshfs -p 2222 \
-  -o reconnect,ServerAliveInterval=15,ServerAliveCountMax=3 \
-  -o uid=$(id -u),gid=$(id -g) \
-  myproject@<host>:/ ~/mnt/dogbot
-code ~/mnt/dogbot
+sftp myproject@dogbot        # interactive: ls, get, put, chmod
+scp main.dog myproject@dogbot:/main.dog
 ```
+
+`scp` works through SFTP, which is the default since OpenSSH 9; older clients
+need `scp -s`. There is no shell on the server, so anything that needs one
+(`rsync` to the server, `git push`, VS Code Remote-SSH) won't work. Mount the
+chat and run them against the mount instead.
+
+To mount it, on Linux (or macOS with [macFUSE](https://macfuse.github.io/)):
+
+```sh
+mkdir -p ~/mnt/myproject
+sshfs myproject@dogbot:/ ~/mnt/myproject \
+  -o reconnect,ServerAliveInterval=15,ServerAliveCountMax=3 \
+  -o uid=$(id -u),gid=$(id -g)
+code ~/mnt/myproject
+```
+
+On Windows, use `sftp` from PowerShell (OpenSSH ships with Windows), WinSCP,
+or SSHFS-Win.
 
 `uid`/`gid` map the files onto your local account. Without them a listing shows
 each owner's Telegram ID, and tools that preserve ownership on save (`sed -i`,
@@ -53,21 +121,60 @@ that were open across the restart are lost. `ServerAliveInterval` is how the
 client notices promptly. The server sends keepalives of its own, so a mount
 that is merely idle is never dropped.
 
-If a mount does wedge — the symptom is a command on it hanging forever rather
-than failing — clear it with `fusermount3 -u -z ~/mnt/dogbot` and mount again.
+If a mount does wedge (a command on it hangs forever instead of failing),
+clear it with `fusermount3 -u -z ~/mnt/myproject` and mount again.
 
-The SSH **username is the chat** (its `/hostname`, or `chat<id>` for a numeric
-ID) and the **key is you**. A mount gives you exactly the access you already
-have in that chat — the same ownership and permission bits `/ls -l` shows.
-Nothing else is exposed: there is no shell and no port forwarding, only SFTP.
+## Testing your bot
 
-Any SFTP client works, so `sftp`, `scp` and `rsync` are available for bulk
-edits and backups.
+Breaking a group's bot in front of everyone is a rite of passage you can skip.
+
+**The console.** `ssh myproject@dogbot` opens a prompt where every line is sent
+to `main.dog` as a message from you. Replies print in the terminal, and so does
+anything the script `send`s, as `[#1] …`. Nothing is posted to Telegram. It is
+the real runtime with the chat's real files, so a script that writes, writes.
+
+```
+$ ssh myproject@dogbot
+dogbot console for myproject. Hi Ana!
+myproject> ping
+pong
+myproject> :eval pln { upper hello }
+HELLO
+```
+
+`:eval <code>` runs a line of dog4 with the chat's modules, without
+`main.dog`. `:help` lists the rest. Up-arrow repeats a message.
+
+**One message at a time**, for scripts and quick checks:
+
+```sh
+ssh myproject@dogbot 'roll 2d6'
+```
+
+The exit status is 0 when the script ran, 1 when it failed (the error goes to
+stderr) and 2 when there was nothing to run. Pipe a file to run one message per
+line, and the status is the worst of them:
+
+```sh
+ssh -T myproject@dogbot < test-messages.txt
+```
+
+**From Telegram.** In a private chat with the bot, `/connect myproject` makes
+your messages run `myproject`'s `main.dog`, with the replies coming to you
+alone. `/disconnect` goes back.
+
+**Plain dog4.** For logic that doesn't touch the bot, the
+[playground](https://henriquecolini.github.io/dog4/) runs dog4 in the browser,
+and `cargo install --git https://github.com/henriquecolini/dog4 dog4` gives you
+the interpreter and a REPL.
 
 ## Writing scripts
 
 A chat runs `main.dog` from its own filesystem. The file must be readable *and*
-executable by you (`/chmod u+x main.dog`). The script's output is the reply.
+executable by whoever sent the message: `/chmod u+x main.dog` is enough in a
+private chat, and a group needs `/chmod g+rx main.dog` too. The script's output
+is the reply. Messages that start with `/` are commands for the bot and never
+reach the script.
 
 Context arrives as globals:
 
@@ -194,6 +301,20 @@ put (try { read missing.txt } catch e { put "no file: $e.message" })
 `post` exist at all. Scripts also run under dog4's sandbox limits (fuel, call
 depth, output size), so a runaway loop stops on its own.
 
+## Examples
+
+[`examples/`](examples/) has small bots to copy, each one runnable as a chat's
+`main.dog` and each covered by the test suite:
+
+| example | shows |
+|---|---|
+| [`dice.dog`](examples/dice.dog) | `roll 2d6+1`: regexes, loops, `random` |
+| [`scoreboard.dog`](examples/scoreboard.dog) | state in a JSON file, maps, sorting |
+| [`quotes.dog`](examples/quotes.dog) | `$reply`, saving and picking quotes |
+| [`progress.dog`](examples/progress.dog) | `send_id`, `edit`, `delete` and `sleep` |
+| [`github.dog`](examples/github.dog) | calling a JSON API with `fetch`, HTML replies |
+| [`router/`](examples/router/) | commands split into a module, a dispatch table |
+
 ## Running it
 
 ```sh
@@ -207,10 +328,15 @@ docker compose up --build
 | `TELOXIDE_TOKEN` | — | Telegram bot token |
 | `SFTP_BIND` | `0.0.0.0:2222` | where the SFTP server listens |
 | `SFTP_HOST`, `SFTP_PORT` | `localhost`, `2222` | what `/mount` tells users to connect to |
+| `DOCS_URL` | this repository's README | the guide `/start` and `/help` link to |
 | `RUST_LOG` | `info` | log filter |
 
 The SSH host key is generated on first boot and kept in the database, so
 redeploying does not break clients' `known_hosts`.
+
+The bot sets its own command menu at startup. For people who have never heard
+of it, give them the bot's `@username` and make sure `SFTP_HOST` is a name
+they can reach; everything after that, `/start` walks them through.
 
 ## Development
 
@@ -222,8 +348,10 @@ TEST_DATABASE_URL="postgresql://test:test@localhost:55432/dogbot_test" cargo tes
 ```
 
 Tests skip themselves when `TEST_DATABASE_URL` is unset. To point a real client
-at a local server, seed a chat and key, then:
+at a local server, seed a chat called `manual` with your key, then connect
+with `ssh -p 52222 manual@127.0.0.1`:
 
 ```sh
-TEST_DATABASE_URL=... cargo test -- --ignored --nocapture manual_server
+MANUAL_PUBKEY="$(cat ~/.ssh/id_ed25519.pub)" TEST_DATABASE_URL=... \
+  cargo test -- --ignored --nocapture manual_server
 ```

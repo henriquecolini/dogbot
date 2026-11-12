@@ -1,0 +1,41 @@
+// Scoreboard: "point" gives the sender a point, "scores" shows the table,
+// "reset scores" clears it.
+//
+// Shows: keeping state in a JSON file between messages, maps, sorting, and
+// `try … catch` for the first run, when the file doesn't exist yet.
+
+use read, write from mod bot;
+
+// Quoted: after `=` dog4 reads an expression, where `/` divides.
+file = "scores.json";
+
+fn load () {
+    // `read` raises when the file is missing; start from an empty map then.
+    put (try { json.parse({ read $file }) } catch e [=])
+}
+
+fn save (scores: map) {
+    write $file { json.encode $scores }
+}
+
+text = { lower { trim $message } };
+
+put (if ($text == point) {
+    scores = { load };
+    // Map keys are text, so the sender's name works as one. A missing key is
+    // null, and `??` turns that into 0.
+    scores[$sender] = ($scores[$sender] ?? 0) + 1;
+    save $scores;
+    put "$sender has $scores[$sender] point(s)."
+} else if ($text == scores) {
+    scores = { load };
+    if (!$scores) { return "Nobody has scored yet. Send: point" };
+    // `entries` turns the map into [name points] pairs, sorted by points,
+    // highest first.
+    ranked = { reverse { sort_by { entries $scores } fn (e) $e[1] } };
+    lines = for i, e in $ranked { put ["$($i + 1). $e[0]: $e[1]"] };
+    put { join $lines "\n" }
+} else if ($text == "reset scores") {
+    save [=];
+    put "Scores cleared."
+})
