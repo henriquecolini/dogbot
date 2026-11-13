@@ -38,6 +38,13 @@ pub struct Context {
     user_full_name: String,
     user_username: Option<String>,
     message_content: String,
+    /// The message as the history keeps it.
+    record: messages::record::Record,
+    /// When it was sent.
+    date: time::OffsetDateTime,
+    /// The text of the message it replies to, and who wrote it, as Telegram
+    /// sent them along. The history's copy is preferred, since that one
+    /// follows edits; these are for messages older than the history.
     reply_to_content: Option<String>,
     reply_to_from: Option<String>,
     document: Option<Document>,
@@ -103,6 +110,18 @@ async fn main() {
 
     let bot = Bot::from_env();
 
+    // Scripts ask who the bot is (`bot.me`), to spot mentions.
+    match bot.get_me().await {
+        Ok(me) => {
+            let _ = messages::ME.set(messages::Identity {
+                id: me.user.id.0 as i64,
+                username: me.user.username.clone().unwrap_or_default(),
+                name: me.user.full_name(),
+            });
+        }
+        Err(err) => warn!("Could not ask Telegram who the bot is: {err}"),
+    }
+
     // The menu Telegram shows behind the `/` button. Without it, a newcomer
     // has to know the commands before they can find them.
     if let Err(err) = bot.set_my_commands(Command::bot_commands()).await {
@@ -119,8 +138,16 @@ async fn main() {
 /// dptree type-checks the tree while it is built and panics on a mistake, so
 /// building it is covered by a test rather than discovered at startup.
 fn schema(pool: PgPool) -> Handler<'static, BotResult<()>, DpHandlerDescription> {
-    Update::filter_message()
+    dptree::entry()
         .map(move || pool.clone())
+        .branch(Update::filter_edited_message().endpoint(record_edit))
+        .branch(Update::filter_message_reaction_updated().endpoint(record_reaction))
+        .branch(Update::filter_message().chain(messages_schema()))
+}
+
+/// The branch for new messages.
+fn messages_schema() -> Handler<'static, BotResult<()>, DpHandlerDescription> {
+    dptree::entry()
         .branch(
             dptree::filter(added_to_group).endpoint(greet_group),
         )
@@ -174,7 +201,8 @@ fn register_message(
         chat_id,
         user_id,
         message_id,
-        message_content,
+        record,
+        date,
         chat_is_private,
         chat_name,
         user_first_name,
@@ -193,13 +221,92 @@ fn register_message(
         user_username.as_deref(),
     )?;
     model::UserInChat::upsert(&mut cn, user_id, chat_id)?;
-    model::Message::insert(
+    let origin = model::Origin {
+        user_id: Some(user_id),
+        date: Some(date),
+        ..Default::default()
+    };
+    model::Message::insert(&mut cn, message_id, chat_id, &record, &origin)?;
+    prune_history(&mut cn, chat_id, user_id, message_id);
+    Ok(())
+}
+
+/// Every this many messages, a chat's history is cut back to its limit. Doing
+/// it on every message would cost a query each time to delete nothing; this
+/// way the history overshoots by at most this much.
+const PRUNE_EVERY: i32 = 50;
+
+/// Keeps the chat's history within `history_limit` (`config/bot.json`).
+fn prune_history(cn: &mut PgConnection, chat_id: ChatId, user_id: UserId, id: MessageId) {
+    if id.0 % PRUNE_EVERY != 0 {
+        return;
+    }
+    let limit = messages::load_config(cn, chat_id, user_id).history_limit;
+    match model::Message::prune(cn, chat_id, limit as i64) {
+        Ok(0) => {}
+        Ok(n) => info!("Pruned {n} old messages from chat {chat_id}"),
+        Err(err) => warn!("Could not prune the history of chat {chat_id}: {err}"),
+    }
+}
+
+/// A Telegram date (seconds since the epoch) as the database stores it.
+fn to_time(unix: i64) -> time::OffsetDateTime {
+    time::OffsetDateTime::from_unix_timestamp(unix)
+        .unwrap_or_else(|_| time::OffsetDateTime::now_utc())
+}
+
+/// Someone edited a message: the history takes the new version. `main.dog`
+/// doesn't run again; fixing a typo in a request shouldn't answer it twice.
+async fn record_edit(pool: PgPool, msg: Message) -> BotResult<()> {
+    let Some(record) = messages::record::describe(&msg) else {
+        return Ok(());
+    };
+    let mut cn = pool.get()?;
+    if let Some(user) = &msg.from {
+        model::User::upsert(
+            &mut cn,
+            user.id,
+            &user.first_name,
+            user.last_name.as_deref(),
+            user.username.as_deref(),
+        )?;
+    }
+    let edited_at = msg
+        .edit_date()
+        .map(|d| to_time(d.timestamp()))
+        .unwrap_or_else(time::OffsetDateTime::now_utc);
+    model::Message::apply_edit(&mut cn, msg.id, msg.chat.id, &record, edited_at)?;
+    Ok(())
+}
+
+/// Someone changed their reactions to a message. Telegram sends these only to
+/// a bot that is an administrator of the group. Anonymous reactions (from a
+/// channel or an anonymous admin) have nobody to file them under, so they are
+/// left out.
+async fn record_reaction(pool: PgPool, update: MessageReactionUpdated) -> BotResult<()> {
+    let MaybeAnonymousUser::User(user) = &update.actor else {
+        return Ok(());
+    };
+    let emojis = update
+        .new_reaction
+        .iter()
+        .map(|r| match r {
+            ReactionType::Emoji { emoji } => emoji.clone(),
+            ReactionType::CustomEmoji { custom_emoji_id } => {
+                format!("custom:{}", custom_emoji_id.0)
+            }
+            ReactionType::Paid => "⭐".to_string(),
+        })
+        .collect::<Vec<_>>();
+    let mut cn = pool.get()?;
+    model::User::upsert(
         &mut cn,
-        message_id,
-        chat_id,
-        Some(user_id),
-        &message_content,
+        user.id,
+        &user.first_name,
+        user.last_name.as_deref(),
+        user.username.as_deref(),
     )?;
+    model::Reaction::replace(&mut cn, update.chat.id, update.message_id, user.id, &emojis)?;
     Ok(())
 }
 
@@ -211,33 +318,13 @@ async fn extract_context(pool: PgPool, msg: Message) -> Option<Context> {
             return None;
         }
     };
+    let record = messages::record::describe(&msg)?;
+    let user = msg.from.clone()?;
+    let document = msg.document().cloned();
+    let reply_to_message = msg.reply_to_message().cloned();
+    let date = to_time(msg.date.timestamp());
     let chat = msg.chat;
-    let Some(user) = msg.from else {
-        return None;
-    };
-    let (message_content, document, reply_to_message) = match msg.kind {
-        MessageKind::Common(msg) => match msg.media_kind {
-            MediaKind::Text(MediaText { text, .. }) => (text, None, msg.reply_to_message),
-            MediaKind::Document(MediaDocument {
-                caption, document, ..
-            }) => (
-                caption.unwrap_or_else(String::new),
-                Some(document),
-                msg.reply_to_message,
-            ),
-            MediaKind::Animation(MediaAnimation { caption, .. })
-            | MediaKind::Audio(MediaAudio { caption, .. })
-            | MediaKind::Photo(MediaPhoto { caption, .. })
-            | MediaKind::Video(MediaVideo { caption, .. })
-            | MediaKind::Voice(MediaVoice { caption, .. }) => (
-                caption.unwrap_or_else(String::new),
-                None,
-                msg.reply_to_message,
-            ),
-            _ => return None,
-        },
-        _ => return None,
-    };
+    let message_content = record.content.clone();
     let (chat_is_private, chat_name) = match chat.kind {
         ChatKind::Public(chat) => (false, chat.title.unwrap_or_default()),
         ChatKind::Private(_) => (true, user.full_name()),
@@ -253,7 +340,7 @@ async fn extract_context(pool: PgPool, msg: Message) -> Option<Context> {
     let (reply_to_content, reply_to_from) = match reply_to_message {
         None => (None, None),
         Some(msg) => (
-            msg.text().map(|t| t.to_owned()),
+            msg.text().or(msg.caption()).map(|t| t.to_owned()),
             msg.from.map(|u| u.full_name()),
         ),
     };
@@ -269,6 +356,8 @@ async fn extract_context(pool: PgPool, msg: Message) -> Option<Context> {
         user_last_name: user.last_name,
         user_username: user.username,
         message_content,
+        record,
+        date,
         reply_to_content,
         reply_to_from,
         document,
@@ -281,10 +370,15 @@ async fn extract_maybe_command(
         message_content,
         chat_id,
         chat_is_private,
+        record,
         ..
     }: Context,
     me: Me,
 ) -> Option<MaybeCommand> {
+    // Someone joining, a pin: history, but nothing anyone said to the bot.
+    if record.is_service() {
+        return None;
+    }
     let bot_name = me.user.username.expect("Bots must have a username");
     if !message_content.starts_with('/') {
         return Some(MaybeCommand::NotACommand);
@@ -406,6 +500,8 @@ mod error_tests {
             user_full_name: String::new(),
             user_username: None,
             message_content: String::new(),
+            record: messages::record::Record::text(""),
+            date: time::OffsetDateTime::UNIX_EPOCH,
             reply_to_content: None,
             reply_to_from: None,
             document: None,
@@ -432,6 +528,18 @@ mod error_tests {
         let pool = Pool::builder().build_unchecked(ConnectionManager::new("postgres://unused"));
         let bot = Bot::new("1:test");
         let _ = Dispatcher::builder(bot, schema(pool)).build();
+    }
+
+    /// Telegram sends reactions only to a bot that asks for them by name, and
+    /// teloxide asks for what the handler tree says it handles.
+    #[test]
+    fn the_bot_asks_for_edits_and_reactions() {
+        // The list itself is private to teloxide; its debug form shows it.
+        let pool = Pool::builder().build_unchecked(ConnectionManager::new("postgres://unused"));
+        let wanted = format!("{:?}", schema(pool).description());
+        for kind in ["Kind(Message)", "Kind(EditedMessage)", "Kind(MessageReaction)"] {
+            assert!(wanted.contains(kind), "{kind} missing from {wanted}");
+        }
     }
 
     #[tokio::test]

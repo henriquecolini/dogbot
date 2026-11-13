@@ -1,0 +1,11 @@
+DROP TABLE message_reactions;
+DROP INDEX messages_chat_id_id;
+ALTER TABLE messages
+    DROP COLUMN kind,
+    DROP COLUMN media,
+    DROP COLUMN reply_to_id,
+    DROP COLUMN quote,
+    DROP COLUMN forward_from,
+    DROP COLUMN edited_at,
+    DROP COLUMN tag,
+    DROP COLUMN trigger_id;

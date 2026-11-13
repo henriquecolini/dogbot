@@ -165,7 +165,11 @@ for w in $message { println "<$w>" };
 use read, write, exists, ls, history, send, send_id, edit, delete, sleep from mod bot;
 ```
 
-* `$message`, `$sender`, `$reply`, `$reply_from` hold the message, as globals.
+* `$message`, `$sender`, `$reply`, `$reply_from` hold the message, as globals;
+  `$message_id` and `$reply_id` are their ids (or null), for `get_message`,
+  `download` and `image`.
+* `history` rows have `id`, `kind` (`text`, `sticker`, `photo`, …), `media`,
+  `reply_to`, `edited`, `reactions`, `tag` and more; the README lists them.
 * `read path` raises when the file is missing: `try { read f } catch e ""`.
 * `write path text` **doesn't create directories**. Make them first, with
   `/mkdir` or over SFTP.

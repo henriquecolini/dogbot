@@ -10,7 +10,7 @@ tokio = { version = "1.52.1", features = ["full"] }
 anyhow = "1.0.102"
 log = "0.4.29"
 dotenvy = "0.15.7"
-diesel = { version = "2.2.0", features = ["postgres", "r2d2", "time", "uuid"] }
+diesel = { version = "2.2.0", features = ["postgres", "r2d2", "time", "uuid", "serde_json"] }
 time = { version = "0.3.47", features = ["formatting"] }
 thiserror = "2.0.18"
 r2d2 = "0.8.10"
@@ -26,3 +26,7 @@ russh-sftp = "3.0"
 rand = "0.10"
 dog4 = { git = "https://github.com/henriquecolini/dog4.git", rev = "f191b2a3ef713a27903de847aba9cd3427ea98b8", version = "0.1.0", default-features = false, features = ["net"] }
 include_dir = "0.7"
+# `bot.image`: decodes what Telegram sends (stickers are webp) and re-encodes
+# it small enough for a vision model.
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "gif"] }
+base64 = "0.22"

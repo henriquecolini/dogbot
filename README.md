@@ -174,7 +174,9 @@ A chat runs `main.dog` from its own filesystem. The file must be readable *and*
 executable by whoever sent the message: `/chmod u+x main.dog` is enough in a
 private chat, and a group needs `/chmod g+rx main.dog` too. The script's output
 is the reply. Messages that start with `/` are commands for the bot and never
-reach the script.
+reach the script. Every other message does, stickers, photos and polls
+included; someone joining, leaving or pinning a message is recorded in the
+history but runs nothing.
 
 Context arrives as globals:
 
@@ -182,7 +184,8 @@ Context arrives as globals:
 |---|---|
 | `$message` | the message that triggered the run |
 | `$sender` | who sent it |
-| `$reply`, `$reply_from` | the message it replied to, if any |
+| `$reply`, `$reply_from` | the text of the message it replied to (as it reads now, edits included), and its author |
+| `$message_id`, `$reply_id` | the ids of both, for `get_message`, `download` and `image`; null when there is none |
 
 ```dog
 pln "hi $sender, you said: $message"
@@ -220,14 +223,63 @@ use read, write, ls, exists, history, version from mod bot;
 | `write path content` | writes a file |
 | `exists path` | whether a path exists |
 | `ls path [files] [dirs]` | an **array** of names |
-| `history [count] [offset] [with_bot]` | recent messages as maps of `user`, `content`, `is_bot` |
+| `history [count] [offset] [with_bot]` | recent messages, oldest first, as maps (see below) |
+| `get_message id` | one message, shaped like a `history` row, or null |
 | `version` | the running build |
+| `me` | the bot's account: `[id, username, name]` |
+| `tag text` | labels the messages this run sends, so `history` can tell them apart |
+| `download id path` | saves a message's attachment into the chat's files; returns its size |
+| `image id [max_side]` | a message's picture as a `data:image/jpeg;base64,…` URL, at most `max_side` (768) pixels wide or tall |
 | `later path` | runs the script at `path` once this message has been answered |
-| `send text [format]` | sends a message to the chat right now, while the script runs |
-| `send_id text [format]` | like `send`, but returns the message's id |
+| `send text [format] [reply_to]` | sends a message to the chat right now, while the script runs; with `reply_to`, as a reply to that message |
+| `send_id text [format] [reply_to]` | like `send`, but returns the message's id |
 | `edit id text [format]` | rewrites a message `send_id` returned the id of |
 | `delete id` | deletes a message the bot sent, by the id `send_id` returned |
 | `sleep seconds` | pauses the script |
+
+### History
+
+The bot keeps what is said in the chat as members see it: edits replace the
+text, reactions are counted, and replies point at the message they answer. A
+`history` row (and `get_message`) has:
+
+| field | is |
+|---|---|
+| `id` | the message's id in the chat |
+| `user`, `user_id`, `is_bot` | who sent it; the bot's own messages have `user` `<bot>` |
+| `content` | its text or caption, `""` if it has none |
+| `date` | when it was sent, in seconds since 1970 |
+| `kind` | `text`, `photo`, `sticker`, `document`, `video`, `animation`, `audio`, `voice`, `video_note`, `poll`, `location`, `venue`, `contact`, `dice`, `service` or `other` |
+| `media` | details by kind, or null: a file's `file_name`, `mime_type`, `file_size`; a sticker's `emoji`; a poll's `question` and `options`; dice's `value`; a service message's `event` (`join`, `leave`, `title`, `pin`, …) |
+| `reply_to` | the id of the message it replies to, or null; for a pin, the pinned message |
+| `quote` | the part of that message it quoted, or the text of a message from another chat it replies to |
+| `forwarded_from` | who wrote it, if it was forwarded |
+| `edited` | whether it was edited |
+| `reactions` | a map of emoji to how many people reacted with it |
+| `tag` | what the script that sent it called it, with `tag` (bot messages only) |
+| `trigger` | the message whose run sent it (bot messages only) |
+
+A reply is stored as an id, not a copy of the text: look it up with
+`get_message` to get what it says now. Telegram doesn't tell bots when someone
+deletes a message, so those stay in the history; messages the bot deletes itself are
+removed. Reactions only arrive while the bot is an administrator of the group.
+
+`tag` sets a label for what the rest of the run sends, its reply included. A
+script that writes its own words (a chatbot, say) can tag them, and tell them
+apart from command output later:
+
+```dog
+use tag from mod bot;
+tag chat;
+put "hello, I'm a bot"
+```
+
+`download` and `image` refuse files over `download_limit` (below). `image`
+takes photos, stickers, image files and the thumbnails of videos, animated
+stickers and the like, and returns a small JPEG that a vision model can take
+as an `image_url`.
+
+### Deferred scripts
 
 `later` is for upkeep nobody should wait on: summarising, reindexing, warming
 a cache. The script is checked for read and execute when queued and runs in the
@@ -294,11 +346,14 @@ put (try { read missing.txt } catch e { put "no file: $e.message" })
 `config/bot.json`:
 
 ```json
-{ "timeout": 90, "net": true }
+{ "timeout": 90, "net": true, "history_limit": 10000, "download_limit": 5242880 }
 ```
 
 `timeout` is seconds of wall clock per run; `net` controls whether `get` and
-`post` exist at all. Scripts also run under dog4's sandbox limits (fuel, call
+`post` exist at all. `history_limit` is how many messages the chat's history
+keeps (older ones are deleted, a few at a time), and `download_limit` the
+largest attachment in bytes `download` and `image` will fetch (Telegram caps it
+at 20 MiB). Scripts also run under dog4's sandbox limits (fuel, call
 depth, output size), so a runaway loop stops on its own.
 
 ## Examples

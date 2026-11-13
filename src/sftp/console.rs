@@ -179,8 +179,7 @@ impl Console {
         let ctx = ScriptContext {
             message,
             sender,
-            reply: String::new(),
-            reply_from: String::new(),
+            ..Default::default()
         };
         let courier: Arc<dyn Courier> = Arc::new(ConsoleCourier::new(
             self.out.clone(),
@@ -197,7 +196,7 @@ impl Console {
         };
 
         match result {
-            Ok(Run { output, later }) => {
+            Ok(Run { output, later, .. }) => {
                 if defer {
                     // Deferred scripts print here too, if the console is still
                     // open when they get to it.
@@ -348,7 +347,7 @@ impl ConsoleCourier {
 }
 
 impl Courier for ConsoleCourier {
-    fn send(&self, text: Formatted, _within: Option<Duration>) -> Result<i32, String> {
+    fn send(&self, text: Formatted, _how: &messages::courier::Outgoing, _within: Option<Duration>) -> Result<i32, String> {
         let id = self.next.fetch_add(1, Ordering::Relaxed);
         self.sent.lock().unwrap().insert(id);
         self.show(format!("#{id}"), Some(text));

@@ -8,7 +8,7 @@ mod user_in_chat;
 
 pub use chat::Chat;
 pub use file::File;
-pub use message::Message;
+pub use message::{Message, Origin, Reaction, Row};
 pub use setting::Setting;
 pub use ssh_key::SshKey;
 pub use user::User;

@@ -14,10 +14,18 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use teloxide::prelude::*;
 
-use super::courier::Courier;
+use super::courier::{Courier, Outgoing};
+
+mod picture;
 
 /// Scripts queued by `later`, to run once the reply has been sent.
 pub type Later = Rc<RefCell<Vec<String>>>;
+
+/// What `bot.tag` set: how the history labels the messages the run sends.
+pub type Tag = Rc<RefCell<Option<String>>>;
+
+/// The longest tag, so a script can't stuff a message's worth into every row.
+const MAX_TAG: usize = 64;
 
 /// How many messages one run may send or edit. Telegram throttles a chat to
 /// roughly a message a second, so this is far more than a script can usefully
@@ -39,6 +47,13 @@ pub struct State {
     pub courier: Option<Arc<dyn Courier>>,
     /// Sends and edits left in this run.
     pub budget: Rc<Cell<u32>>,
+    /// The tag the run's messages get.
+    pub tag: Tag,
+    /// The message this run is handling, which its messages are recorded as
+    /// answering.
+    pub trigger: Option<i64>,
+    /// The largest file `download` and `image` fetch, in bytes.
+    pub download_limit: u64,
 }
 
 impl State {
@@ -70,6 +85,24 @@ fn formatted(text: &str, mode: Option<&str>) -> Result<Formatted, Error> {
 }
 
 impl State {
+    /// How the messages this run sends are recorded.
+    fn outgoing(&self, reply_to: Option<i32>) -> Outgoing {
+        Outgoing {
+            reply_to,
+            tag: self.tag.borrow().clone(),
+            trigger: self.trigger,
+        }
+    }
+
+    /// A message of this chat, as `history` shows them.
+    fn find(&self, id: i64) -> Result<Option<model::Row>, Error> {
+        let mut cn = self.connect()?;
+        model::Message::get(&mut cn, self.chat_id, id).map_err(|err| {
+            error!("bot module: message lookup failed: {err}");
+            Error::value_error("the database is unavailable")
+        })
+    }
+
     /// The courier, after spending one message from the run's budget.
     fn courier(&self) -> Result<&Arc<dyn Courier>, Error> {
         let courier = self
@@ -185,21 +218,8 @@ pub fn build(state: State) -> Value {
 
             let rows = messages
                 .into_iter()
-                .filter(|(_, user)| with_bot || user.is_some())
-                .map(|(message, user)| {
-                    let name = match &user {
-                        Some(user) => match &user.last_name {
-                            Some(last) => format!("{} {}", user.first_name, last),
-                            None => user.first_name.clone(),
-                        },
-                        None => "<bot>".to_string(),
-                    };
-                    let mut row = Map::default();
-                    row.insert("user".into(), Value::str(&name));
-                    row.insert("content".into(), Value::str(&message.content));
-                    row.insert("is_bot".into(), Value::Bool(user.is_none()));
-                    Value::map(row)
-                })
+                .filter(|(_, user, _)| with_bot || user.is_some())
+                .map(row_value)
                 .collect::<Vec<_>>();
             Ok(Value::arr(rows))
         });
@@ -230,20 +250,26 @@ pub fn build(state: State) -> Value {
     // for the format. `send` returns nothing, because a command's value is
     // output in dog4 and a stray message id would end up in the reply; `send_id`
     // is the same call returning the id, for a message that will be `edit`ed.
+    // A third argument sends it as a reply to that message.
     for (name, returns_id) in [("send", false), ("send_id", true)] {
-        for arity in 1..=2 {
+        for arity in 1..=3 {
             let s = state.clone();
-            let params = if arity == 1 {
-                "text: str"
-            } else {
-                "text: str, mode: str"
+            let params = match arity {
+                1 => "text: str",
+                2 => "text: str, mode: str",
+                _ => "text: str, mode: str, reply_to: num",
             };
             lib.def(name, params, move |vm, args| {
                 let mode = args.get(1).map(|m| m.to_string());
                 let text = formatted(&args[0].to_string(), mode.as_deref())?;
+                let reply_to = match args.get(2) {
+                    None => None,
+                    Some(id) => Some(message_id(id, "reply_to needs a message id")?),
+                };
+                let how = s.outgoing(reply_to);
                 let id = s
                     .courier()?
-                    .send(text, vm.meter().remaining())
+                    .send(text, &how, vm.meter().remaining())
                     .map_err(|err| Error::value_error(format!("could not send: {err}")))?;
                 vm.meter().check_now()?;
                 Ok(if returns_id {
@@ -322,5 +348,185 @@ pub fn build(state: State) -> Value {
         Ok(Value::str(option_env!("APP_VERSION").unwrap_or("dev")))
     });
 
+    // One message of this chat, shaped like a `history` row, or null if the
+    // history doesn't have it (deleted by the bot, or older than it keeps).
+    // Not called `message`: a script that imports this module whole would
+    // lose the `message` global behind it.
+    let s = state.clone();
+    lib.def("get_message", "id: num", move |vm, args| {
+        let id = args[0]
+            .as_int()
+            .ok_or_else(|| Error::value_error("get_message needs a message id"))?;
+        let found = s.find(id)?;
+        vm.meter().check_now()?;
+        Ok(found.map(row_value).unwrap_or(Value::Null))
+    });
+
+    // Labels what this run sends from now on: the final reply and later
+    // `send`s. `history` shows it as `tag`, so a script can tell its own kind
+    // of message from a command's output. Null clears it.
+    let s = state.clone();
+    lib.def("tag", "tag: str?", move |_, args| {
+        let tag = match &args[0] {
+            Value::Null => None,
+            v => {
+                let tag = v.to_string();
+                if tag.chars().count() > MAX_TAG {
+                    return Err(Error::value_error(format!(
+                        "a tag has at most {MAX_TAG} characters"
+                    )));
+                }
+                Some(tag)
+            }
+        };
+        *s.tag.borrow_mut() = tag;
+        Ok(Value::Null)
+    });
+
+    // The bot's own account: `[id, username, name]`, so a script can tell
+    // when someone mentions it. Null if it isn't known (the console).
+    lib.def("me", "", |_, _| {
+        Ok(match super::ME.get() {
+            None => Value::Null,
+            Some(me) => {
+                let mut m = Map::default();
+                m.insert("id".into(), Value::Int(me.id));
+                m.insert("username".into(), Value::str(&me.username));
+                m.insert("name".into(), Value::str(&me.name));
+                Value::map(m)
+            }
+        })
+    });
+
+    // Saves a message's attachment into the chat's files, as whoever sent the
+    // message may write there. Returns its size in bytes.
+    let s = state.clone();
+    lib.def("download", "id: num, path: str", move |vm, args| {
+        let id = args[0]
+            .as_int()
+            .ok_or_else(|| Error::value_error("download needs a message id"))?;
+        let path = args[1].to_string();
+        let (message, _, _) = s
+            .find(id)?
+            .ok_or_else(|| Error::value_error(format!("message {id} is not in the history")))?;
+        let media = message.media.unwrap_or_default();
+        let Some(file_id) = media.get("file_id").and_then(|f| f.as_str()) else {
+            return Err(Error::value_error(format!("message {id} has no file")));
+        };
+        if let Some(size) = media.get("file_size").and_then(|f| f.as_u64())
+            && size > s.download_limit
+        {
+            return Err(Error::value_error(super::courier::too_big(size, s.download_limit)));
+        }
+        let courier = s
+            .courier
+            .as_ref()
+            .ok_or_else(|| Error::value_error("this script cannot download files"))?;
+        let bytes = courier
+            .fetch(file_id, s.download_limit, vm.meter().remaining())
+            .map_err(|err| Error::value_error(format!("could not download: {err}")))?;
+        vm.meter().check_now()?;
+        let mut cn = s.connect()?;
+        files::write(&mut cn, s.chat_id, s.user_id, &path, &bytes).map_err(fs_error)?;
+        Ok(Value::Int(bytes.len() as i64))
+    });
+
+    // A message's picture as a `data:image/jpeg;base64,…` URL, scaled down to
+    // `max_side` pixels (768 by default), which is what a vision model takes.
+    // Photos, stickers (their thumbnail, if animated), image files, and the
+    // thumbnails of videos.
+    for arity in 1..=2 {
+        let s = state.clone();
+        let params = if arity == 1 {
+            "id: num"
+        } else {
+            "id: num, max_side: num"
+        };
+        lib.def("image", params, move |vm, args| {
+            let id = args[0]
+                .as_int()
+                .ok_or_else(|| Error::value_error("image needs a message id"))?;
+            let side = match args.get(1) {
+                None => picture::DEFAULT_SIDE,
+                Some(v) => v
+                    .as_int()
+                    .filter(|n| (16..=picture::MAX_SIDE as i64).contains(n))
+                    .ok_or_else(|| {
+                        Error::value_error(format!(
+                            "max_side is a number of pixels, from 16 to {}",
+                            picture::MAX_SIDE
+                        ))
+                    })? as u32,
+            };
+            let (message, _, _) = s
+                .find(id)?
+                .ok_or_else(|| Error::value_error(format!("message {id} is not in the history")))?;
+            let file_id = picture::source(&message.kind, message.media.as_ref())
+                .ok_or_else(|| Error::value_error(format!("message {id} has no picture")))?;
+            let courier = s
+                .courier
+                .as_ref()
+                .ok_or_else(|| Error::value_error("this script cannot download files"))?;
+            let bytes = courier
+                .fetch(&file_id, s.download_limit, vm.meter().remaining())
+                .map_err(|err| Error::value_error(format!("could not download: {err}")))?;
+            vm.meter().check_now()?;
+            let url = picture::data_url(&bytes, side).map_err(Error::value_error)?;
+            vm.meter().check_now()?;
+            Ok(Value::str(url))
+        });
+    }
+
     lib.into_value()
+}
+
+/// A message id from a script, as Telegram numbers them.
+fn message_id(value: &Value, complaint: &str) -> Result<i32, Error> {
+    value
+        .as_int()
+        .and_then(|id| i32::try_from(id).ok())
+        .ok_or_else(|| Error::value_error(complaint.to_string()))
+}
+
+fn opt_int(v: Option<i64>) -> Value {
+    v.map(Value::Int).unwrap_or(Value::Null)
+}
+
+fn opt_str(v: Option<&str>) -> Value {
+    v.map(Value::str).unwrap_or(Value::Null)
+}
+
+/// A message as scripts see it, in `history` and `get_message`.
+fn row_value((message, user, reactions): model::Row) -> Value {
+    let name = match &user {
+        Some(user) => match &user.last_name {
+            Some(last) => format!("{} {}", user.first_name, last),
+            None => user.first_name.clone(),
+        },
+        None => "<bot>".to_string(),
+    };
+    let mut row = Map::default();
+    row.insert("id".into(), Value::Int(message.id));
+    row.insert("user".into(), Value::str(&name));
+    row.insert("user_id".into(), opt_int(message.user_id));
+    row.insert("content".into(), Value::str(&message.content));
+    row.insert("is_bot".into(), Value::Bool(user.is_none()));
+    row.insert("date".into(), Value::Int(message.created_at.unix_timestamp()));
+    row.insert("kind".into(), Value::str(&message.kind));
+    row.insert(
+        "media".into(),
+        message.media.map(dog4::value::from_json).unwrap_or(Value::Null),
+    );
+    row.insert("reply_to".into(), opt_int(message.reply_to_id));
+    row.insert("quote".into(), opt_str(message.quote.as_deref()));
+    row.insert("forwarded_from".into(), opt_str(message.forward_from.as_deref()));
+    row.insert("edited".into(), Value::Bool(message.edited_at.is_some()));
+    let mut counts = Map::default();
+    for (emoji, n) in reactions {
+        counts.insert(emoji.into(), Value::Int(n));
+    }
+    row.insert("reactions".into(), Value::map(counts));
+    row.insert("tag".into(), opt_str(message.tag.as_deref()));
+    row.insert("trigger".into(), opt_int(message.trigger_id));
+    Value::map(row)
 }

@@ -52,6 +52,7 @@ impl Harness {
                 sender: "Tester".to_string(),
                 reply: reply.to_string(),
                 reply_from: reply_from.to_string(),
+                ..Default::default()
             },
             Hooks::default(),
         )
@@ -71,10 +72,12 @@ impl Harness {
                 sender: "Tester".to_string(),
                 reply: String::new(),
                 reply_from: String::new(),
+                ..Default::default()
             },
             Hooks {
                 later: Some(later.clone()),
                 courier: None,
+                tag: None,
             },
         );
         (out, later.take())
@@ -258,6 +261,7 @@ fn an_endless_loop_hits_the_time_limit() {
     let config = Config {
         timeout: 0.5,
         net: false,
+        ..Config::default()
     };
     let err = run_script(
         h.pool.clone(),
@@ -270,6 +274,7 @@ fn an_endless_loop_hits_the_time_limit() {
             sender: String::new(),
             reply: String::new(),
             reply_from: String::new(),
+            ..Default::default()
         },
         Hooks::default(),
     )
@@ -286,6 +291,7 @@ fn net_is_withheld_when_the_config_says_so() {
     let config = Config {
         timeout: 5.0,
         net: false,
+        ..Config::default()
     };
     // A withheld capability removes the builtin, so this fails to compile.
     let err = run_script(
@@ -299,6 +305,7 @@ fn net_is_withheld_when_the_config_says_so() {
             sender: String::new(),
             reply: String::new(),
             reply_from: String::new(),
+            ..Default::default()
         },
         Hooks::default(),
     )
@@ -428,6 +435,8 @@ use std::time::Instant;
 struct FakeCourier {
     /// `(id, mode, text)` for every send, and `edit` records under the same id.
     log: Mutex<Vec<String>>,
+    /// What `fetch` serves, by file id.
+    files: Mutex<std::collections::HashMap<String, Vec<u8>>>,
 }
 
 fn describe(text: &Formatted) -> String {
@@ -440,7 +449,7 @@ fn describe(text: &Formatted) -> String {
 }
 
 impl Courier for FakeCourier {
-    fn send(&self, text: Formatted, _: Option<Duration>) -> Result<i32, String> {
+    fn send(&self, text: Formatted, _: &courier::Outgoing, _: Option<Duration>) -> Result<i32, String> {
         let mut log = self.log.lock().unwrap();
         log.push(format!("send {}", describe(&text)));
         Ok(100 + log.len() as i32)
@@ -452,6 +461,14 @@ impl Courier for FakeCourier {
     fn delete(&self, id: i32, _: Option<Duration>) -> Result<(), String> {
         self.log.lock().unwrap().push(format!("delete {id}"));
         Ok(())
+    }
+    fn fetch(&self, file_id: &str, max: u64, _: Option<Duration>) -> Result<Vec<u8>, String> {
+        let bytes = self.files.lock().unwrap().get(file_id).cloned();
+        let bytes = bytes.ok_or_else(|| format!("no file {file_id}"))?;
+        if bytes.len() as u64 > max {
+            return Err(courier::too_big(bytes.len() as u64, max));
+        }
+        Ok(bytes)
     }
 }
 
@@ -479,10 +496,12 @@ fn run_offline(
             sender: String::new(),
             reply: String::new(),
             reply_from: String::new(),
+            ..Default::default()
         },
         Hooks {
             later: None,
             courier,
+            tag: None,
         },
     )
 }
@@ -573,7 +592,7 @@ fn delete_needs_a_real_id_and_reports_refusals() {
 /// A courier that refuses to delete, as the real one does for other people's messages.
 struct Refusing;
 impl Courier for Refusing {
-    fn send(&self, _: Formatted, _: Option<Duration>) -> Result<i32, String> {
+    fn send(&self, _: Formatted, _: &courier::Outgoing, _: Option<Duration>) -> Result<i32, String> {
         Ok(1)
     }
     fn edit(&self, _: i32, _: Formatted, _: Option<Duration>) -> Result<(), String> {
@@ -618,7 +637,7 @@ fn a_run_has_a_message_budget() {
 fn a_courier_failure_is_catchable() {
     struct Down;
     impl Courier for Down {
-        fn send(&self, _: Formatted, _: Option<Duration>) -> Result<i32, String> {
+        fn send(&self, _: Formatted, _: &courier::Outgoing, _: Option<Duration>) -> Result<i32, String> {
             Err("Too Many Requests: retry after 3".into())
         }
         fn edit(&self, _: i32, _: Formatted, _: Option<Duration>) -> Result<(), String> {
@@ -655,6 +674,7 @@ fn sleep_cannot_outlive_the_time_limit() {
     let config = Config {
         timeout: 0.4,
         net: false,
+        ..Config::default()
     };
     let started = Instant::now();
     let err = run_offline("use sleep from mod bot; sleep 60", &config, None).unwrap_err();
@@ -668,7 +688,7 @@ fn sleep_rejects_nonsense() {
         r#"use sleep from mod bot;
            put (try { sleep -1 } catch e { put "[negative]" });
            put (try { sleep 1e400 } catch e { put "[huge]" })"#,
-        &Config { timeout: 0.3, net: false },
+        &Config { timeout: 0.3, net: false, ..Config::default() },
         None,
     );
     // -1 is refused outright; an absurd value is clamped by the time limit.
@@ -762,6 +782,7 @@ fn run_example(h: &Harness, source: &str, message: &str, sender: &str, reply: (&
             sender: sender.to_string(),
             reply: reply.0.to_string(),
             reply_from: reply.1.to_string(),
+            ..Default::default()
         },
         Hooks::default(),
     )
@@ -836,10 +857,12 @@ fn example_progress() {
             sender: "Ana".into(),
             reply: String::new(),
             reply_from: String::new(),
+            ..Default::default()
         },
         Hooks {
             later: None,
             courier: Some(courier.clone()),
+            tag: None,
         },
     )
     .unwrap();
@@ -867,4 +890,245 @@ fn a_refused_init_changes_nothing() {
     assert!(crate::commands::init::init(&mut cn, h.chat, USER, Some("othername")).is_err());
     let chat = model::Chat::find(&mut cn, ChatAddress::Id(h.chat)).unwrap().unwrap();
     assert_eq!(chat.alias.as_deref(), Some(name.as_str()));
+}
+
+// History as Telegram has it: kinds, replies, edits, reactions, tags, limits.
+
+impl Harness {
+    /// Records a message from the tester, as the dispatcher would.
+    fn said(&self, id: i32, record: record::Record) {
+        let mut cn = self.pool.get().unwrap();
+        let origin = model::Origin {
+            user_id: Some(USER),
+            ..Default::default()
+        };
+        model::Message::insert(&mut cn, MessageId(id), self.chat, &record, &origin).unwrap();
+    }
+
+    /// Records a message from the bot.
+    fn bot_said(&self, id: i32, text: &str, tag: Option<&str>, trigger: Option<i32>) {
+        let mut cn = self.pool.get().unwrap();
+        let origin = model::Origin {
+            tag: tag.map(str::to_owned),
+            trigger: trigger.map(MessageId),
+            ..Default::default()
+        };
+        let record = record::Record::text(text);
+        model::Message::insert(&mut cn, MessageId(id), self.chat, &record, &origin).unwrap();
+    }
+
+    fn run_with(&self, source: &str, ctx: ScriptContext, hooks: Hooks) -> Result<String, String> {
+        run_script(self.pool.clone(), self.chat, USER, source, &Config::default(), &ctx, hooks)
+    }
+}
+
+use teloxide::types::MessageId;
+
+#[test]
+fn history_shows_kinds_replies_and_who_tagged_what() {
+    script_test!(h);
+    h.said(10, record::Record::text("bot régua"));
+    h.bot_said(11, "8=====D", None, Some(10));
+    h.said(
+        12,
+        record::Record {
+            kind: "sticker",
+            media: Some(serde_json::json!({ "emoji": "😂", "file_id": "f" })),
+            reply_to_id: Some(11),
+            ..Default::default()
+        },
+    );
+    h.bot_said(13, "kkkk boa", Some("alucine"), Some(12));
+    let out = h
+        .run(
+            r#"use history from mod bot;
+fn s (v) (if ($v == null) "null" else "$v");
+put for m in { history 10 0 true } {
+    pln "$m.id $m.kind $m.is_bot reply=$({ s $m.reply_to }) tag=$({ s $m.tag }) trigger=$({ s $m.trigger }) emoji=$({ put ($m.media.emoji ?? "-") })"
+}"#,
+        )
+        .unwrap();
+    assert_eq!(
+        out,
+        "10 text false reply=null tag=null trigger=null emoji=-\n\
+         11 text true reply=null tag=null trigger=10 emoji=-\n\
+         12 sticker false reply=11 tag=null trigger=null emoji=😂\n\
+         13 text true reply=null tag=alucine trigger=12 emoji=-\n"
+    );
+}
+
+#[test]
+fn an_edit_changes_what_history_says() {
+    script_test!(h);
+    h.said(20, record::Record::text("pizza é ruim"));
+    let mut cn = h.pool.get().unwrap();
+    let n = model::Message::apply_edit(
+        &mut cn,
+        MessageId(20),
+        h.chat,
+        &record::Record::text("pizza é bom"),
+        time::OffsetDateTime::now_utc(),
+    )
+    .unwrap();
+    assert_eq!(n, 1);
+    // A message the history never had is not invented by an edit.
+    let n = model::Message::apply_edit(
+        &mut cn,
+        MessageId(999),
+        h.chat,
+        &record::Record::text("x"),
+        time::OffsetDateTime::now_utc(),
+    )
+    .unwrap();
+    assert_eq!(n, 0);
+    drop(cn);
+    let out = h
+        .run(r#"use get_message from mod bot; let m = { get_message 20 }; put "$m.content $m.edited""#)
+        .unwrap();
+    assert_eq!(out, "pizza é bom true");
+    assert_eq!(
+        h.run("use get_message from mod bot; put ({ get_message 999 } == null)").unwrap(),
+        "true"
+    );
+}
+
+#[test]
+fn reactions_are_counted_per_emoji() {
+    script_test!(h);
+    h.said(30, record::Record::text("piada"));
+    let mut cn = h.pool.get().unwrap();
+    let other = UserId(80002);
+    model::User::upsert(&mut cn, other, "Bruno", None, None).unwrap();
+    let e = |s: &[&str]| s.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+    model::Reaction::replace(&mut cn, h.chat, MessageId(30), USER, &e(&["😂", "👍"])).unwrap();
+    model::Reaction::replace(&mut cn, h.chat, MessageId(30), other, &e(&["😂"])).unwrap();
+    // Changing one's mind replaces, rather than adds to, what one had.
+    model::Reaction::replace(&mut cn, h.chat, MessageId(30), USER, &e(&["😂"])).unwrap();
+    // Reactions to a message the history doesn't have are ignored.
+    model::Reaction::replace(&mut cn, h.chat, MessageId(31), USER, &e(&["😂"])).unwrap();
+    drop(cn);
+    let out = h
+        .run(r#"use get_message from mod bot; put { json.encode ({ get_message 30 }.reactions) }"#)
+        .unwrap();
+    assert_eq!(out, r#"{"😂":2}"#);
+}
+
+#[test]
+fn pruning_keeps_the_newest_messages() {
+    script_test!(h);
+    for id in 1..=12 {
+        h.said(id, record::Record::text(format!("m{id}")));
+    }
+    let mut cn = h.pool.get().unwrap();
+    assert_eq!(model::Message::prune(&mut cn, h.chat, 5).unwrap(), 7);
+    assert_eq!(model::Message::prune(&mut cn, h.chat, 5).unwrap(), 0);
+    let left = model::Message::list(&mut cn, h.chat, 100, 0).unwrap();
+    let ids = left.iter().map(|(m, _, _)| m.id).collect::<Vec<_>>();
+    assert_eq!(ids, vec![8, 9, 10, 11, 12]);
+}
+
+#[test]
+fn the_message_ids_arrive_as_globals_and_tag_reaches_the_run() {
+    script_test!(h);
+    let tag = runtime::Tag::default();
+    let ctx = ScriptContext {
+        message_id: Some(41),
+        reply_id: Some(40),
+        ..Default::default()
+    };
+    let hooks = Hooks {
+        tag: Some(tag.clone()),
+        ..Default::default()
+    };
+    let out = h
+        .run_with(r#"use tag from mod bot; tag alucine; put "$message_id/$reply_id""#, ctx, hooks)
+        .unwrap();
+    assert_eq!(out, "41/40");
+    assert_eq!(tag.borrow().as_deref(), Some("alucine"));
+    let out = h.run_with(
+        r#"put ($message_id == null && $reply_id == null)"#,
+        ScriptContext::default(),
+        Hooks::default(),
+    );
+    assert_eq!(out.unwrap(), "true");
+}
+
+#[test]
+fn download_saves_an_attachment_within_the_limit() {
+    script_test!(h);
+    let doc = |id: &str, size: u64| record::Record {
+        kind: "document",
+        media: Some(serde_json::json!({ "file_id": id, "file_name": "a.txt", "file_size": size })),
+        ..Default::default()
+    };
+    h.said(50, doc("small", 5));
+    h.said(51, doc("huge", 50 * 1024 * 1024));
+    h.said(52, record::Record::text("no file here"));
+    let courier = Arc::new(FakeCourier::default());
+    courier.files.lock().unwrap().insert("small".into(), b"hello".to_vec());
+    let hooks = || Hooks {
+        courier: Some(courier.clone() as Arc<dyn Courier>),
+        ..Default::default()
+    };
+    let src = r#"use download, read from mod bot; let n = { download 50 got.txt }; put "$n:$({ read got.txt })""#;
+    assert_eq!(h.run_with(src, ScriptContext::default(), hooks()).unwrap(), "5:hello");
+    let err = h
+        .run_with("use download from mod bot; download 51 big.bin", ScriptContext::default(), hooks())
+        .unwrap_err();
+    assert!(err.contains("over the limit"), "{err}");
+    let err = h
+        .run_with("use download from mod bot; download 52 x", ScriptContext::default(), hooks())
+        .unwrap_err();
+    assert!(err.contains("has no file"), "{err}");
+}
+
+#[test]
+fn image_gives_a_jpeg_data_url() {
+    script_test!(h);
+    h.said(
+        60,
+        record::Record {
+            kind: "sticker",
+            media: Some(serde_json::json!({ "file_id": "st", "format": "static", "emoji": "🐶" })),
+            ..Default::default()
+        },
+    );
+    let mut png = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgb8(image::RgbImage::new(1000, 500))
+        .write_to(&mut png, image::ImageFormat::Png)
+        .unwrap();
+    let courier = Arc::new(FakeCourier::default());
+    courier.files.lock().unwrap().insert("st".into(), png.into_inner());
+    let hooks = Hooks {
+        courier: Some(courier.clone() as Arc<dyn Courier>),
+        ..Default::default()
+    };
+    let out = h
+        .run_with(
+            "use image from mod bot; put { image 60 200 }[..23]",
+            ScriptContext::default(),
+            hooks,
+        )
+        .unwrap();
+    assert_eq!(out, "data:image/jpeg;base64,");
+}
+
+/// A script that imports the whole `bot` module must still see the message
+/// globals: no native may be named like one of them.
+#[test]
+fn importing_the_whole_bot_module_keeps_the_globals_visible() {
+    script_test!(h);
+    let out = h.run_with(
+        r#"use mod bot; put "$message/$sender/$reply/$reply_from/$({ json.encode $message_id })/$({ json.encode $reply_id })""#,
+        ScriptContext {
+            message: "oi".into(),
+            sender: "Ana".into(),
+            reply: "r".into(),
+            reply_from: "Bruno".into(),
+            message_id: Some(5),
+            reply_id: Some(4),
+        },
+        Hooks::default(),
+    );
+    assert_eq!(out.unwrap(), "oi/Ana/r/Bruno/5/4");
 }

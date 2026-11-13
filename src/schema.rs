@@ -35,12 +35,30 @@ diesel::table! {
 }
 
 diesel::table! {
+    message_reactions (chat_id, message_id, user_id, emoji) {
+        chat_id -> Int8,
+        message_id -> Int8,
+        user_id -> Int8,
+        emoji -> Text,
+        created_at -> Timestamptz,
+    }
+}
+
+diesel::table! {
     messages (id, chat_id) {
         id -> Int8,
         chat_id -> Int8,
         user_id -> Nullable<Int8>,
         content -> Text,
         created_at -> Timestamptz,
+        kind -> Text,
+        media -> Nullable<Jsonb>,
+        reply_to_id -> Nullable<Int8>,
+        quote -> Nullable<Text>,
+        forward_from -> Nullable<Text>,
+        edited_at -> Nullable<Timestamptz>,
+        tag -> Nullable<Text>,
+        trigger_id -> Nullable<Int8>,
     }
 }
 
@@ -84,6 +102,7 @@ diesel::table! {
 }
 
 diesel::joinable!(files -> users (owner_id));
+diesel::joinable!(message_reactions -> users (user_id));
 diesel::joinable!(messages -> chats (chat_id));
 diesel::joinable!(messages -> users (user_id));
 diesel::joinable!(ssh_keys -> users (user_id));
@@ -92,6 +111,7 @@ diesel::joinable!(users_in_chats -> chats (chat_id));
 diesel::allow_tables_to_appear_in_same_query!(
     chats,
     files,
+    message_reactions,
     messages,
     settings,
     ssh_keys,

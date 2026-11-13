@@ -8,17 +8,34 @@
 use crate::prelude::*;
 use log::*;
 use std::time::Duration;
+use teloxide::net::Download;
+use teloxide::payloads::SendMessageSetters;
 use teloxide::prelude::*;
-use teloxide::types::MessageId;
+use teloxide::types::{FileId, MessageId, ReplyParameters};
+
+/// How a message is sent and what the history says of it.
+#[derive(Clone, Debug, Default)]
+pub struct Outgoing {
+    /// Sent as a reply to this message.
+    pub reply_to: Option<i32>,
+    /// What the script called it (`bot.tag`).
+    pub tag: Option<String>,
+    /// The message whose run sent it.
+    pub trigger: Option<i64>,
+}
 
 pub trait Courier: Send + Sync {
     /// Sends a new message and returns its id. `within` is how long the script
     /// can still afford to wait.
-    fn send(&self, text: Formatted, within: Option<Duration>) -> Result<i32, String>;
+    fn send(&self, text: Formatted, how: &Outgoing, within: Option<Duration>) -> Result<i32, String>;
     /// Replaces the text of a message this run (or an earlier one) sent.
     fn edit(&self, id: i32, text: Formatted, within: Option<Duration>) -> Result<(), String>;
     /// Deletes a message the bot sent. Refuses anyone else's.
     fn delete(&self, id: i32, within: Option<Duration>) -> Result<(), String>;
+    /// Downloads a file Telegram holds, refusing one over `max_bytes`.
+    fn fetch(&self, _file_id: &str, _max_bytes: u64, _within: Option<Duration>) -> Result<Vec<u8>, String> {
+        Err("files can't be downloaded from here".to_string())
+    }
 }
 
 /// The real thing: sends through the bot and records what it sent.
@@ -65,12 +82,46 @@ impl TelegramCourier {
 }
 
 impl Courier for TelegramCourier {
-    fn send(&self, text: Formatted, within: Option<Duration>) -> Result<i32, String> {
-        let sent = self.wait(within, self.bot.send_formatted(self.chat_id, text).into_future())?;
-        let (id, content) = (sent.id, sent.text().unwrap_or_default().to_owned());
+    fn send(&self, text: Formatted, how: &Outgoing, within: Option<Duration>) -> Result<i32, String> {
+        let mut request = self.bot.send_formatted(self.chat_id, text);
+        if let Some(reply_to) = how.reply_to {
+            // If that message is gone, send anyway rather than fail.
+            request = request.reply_parameters(
+                ReplyParameters::new(MessageId(reply_to)).allow_sending_without_reply(),
+            );
+        }
+        let sent = self.wait(within, request.into_future())?;
+        let record = super::record::describe(&sent)
+            .unwrap_or_else(|| super::record::Record::text(sent.text().unwrap_or_default()));
         // Bot messages are recorded with a null user, like the final reply.
-        self.record(|cn| model::Message::insert(cn, id, self.chat_id, None, &content));
-        Ok(id.0)
+        let origin = model::Origin {
+            trigger: how.trigger.map(|t| MessageId(t as i32)),
+            tag: how.tag.clone(),
+            ..Default::default()
+        };
+        self.record(|cn| model::Message::insert(cn, sent.id, self.chat_id, &record, &origin));
+        Ok(sent.id.0)
+    }
+
+    fn fetch(&self, file_id: &str, max_bytes: u64, within: Option<Duration>) -> Result<Vec<u8>, String> {
+        let file = self.wait(within, self.bot.get_file(FileId(file_id.to_string())).into_future())?;
+        // Telegram leaves the size out now and then (teloxide reads u32::MAX);
+        // the download is checked again below either way.
+        if file.meta.size != u32::MAX && file.meta.size as u64 > max_bytes {
+            return Err(too_big(file.meta.size as u64, max_bytes));
+        }
+        let mut bytes = Vec::new();
+        let limit = within.unwrap_or(DEFAULT_WAIT).min(DEFAULT_WAIT);
+        let download = self.bot.download_file(&file.path, &mut bytes);
+        match self.handle.block_on(tokio::time::timeout(limit, download)) {
+            Ok(Ok(())) => {}
+            Ok(Err(err)) => return Err(err.to_string()),
+            Err(_) => return Err("telegram did not answer in time".to_string()),
+        }
+        if bytes.len() as u64 > max_bytes {
+            return Err(too_big(bytes.len() as u64, max_bytes));
+        }
+        Ok(bytes)
     }
 
     fn edit(&self, id: i32, text: Formatted, within: Option<Duration>) -> Result<(), String> {
@@ -114,4 +165,14 @@ impl Courier for TelegramCourier {
         self.record(|cn| model::Message::remove(cn, message, self.chat_id));
         Ok(())
     }
+}
+
+/// Why a file wasn't downloaded.
+pub fn too_big(size: u64, max: u64) -> String {
+    let mib = |b: u64| b as f64 / (1024.0 * 1024.0);
+    format!(
+        "the file has {:.1} MiB, over the limit of {:.1} MiB (download_limit in config/bot.json)",
+        mib(size),
+        mib(max)
+    )
 }

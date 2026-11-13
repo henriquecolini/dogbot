@@ -1,5 +1,6 @@
 pub mod courier;
 mod provider;
+pub mod record;
 mod runtime;
 
 use crate::prelude::*;
@@ -24,6 +25,13 @@ pub struct Config {
     /// Whether scripts may make outbound HTTP requests.
     #[serde(default = "default_net")]
     net: bool,
+    /// How many messages the chat's history keeps; older ones are deleted.
+    #[serde(default = "default_history_limit")]
+    pub history_limit: u32,
+    /// The largest attachment, in bytes, `bot.download` and `bot.image` will
+    /// fetch. Telegram itself serves bots nothing over 20 MiB.
+    #[serde(default = "default_download_limit")]
+    pub download_limit: u64,
 }
 
 fn default_timeout() -> f32 {
@@ -34,14 +42,37 @@ fn default_net() -> bool {
     true
 }
 
+fn default_history_limit() -> u32 {
+    10_000
+}
+
+fn default_download_limit() -> u64 {
+    5 * 1024 * 1024
+}
+
+/// What Telegram lets a bot download at all.
+pub const TELEGRAM_DOWNLOAD_LIMIT: u64 = 20 * 1024 * 1024;
+
 impl Default for Config {
     fn default() -> Self {
         Config {
             timeout: default_timeout(),
             net: default_net(),
+            history_limit: default_history_limit(),
+            download_limit: default_download_limit(),
         }
     }
 }
+
+/// The bot's own account, as `bot.me` tells scripts. Set once at startup.
+#[derive(Clone, Debug)]
+pub struct Identity {
+    pub id: i64,
+    pub username: String,
+    pub name: String,
+}
+
+pub static ME: std::sync::OnceLock<Identity> = std::sync::OnceLock::new();
 
 /// Hard cap on what one script run may print, so a runaway loop cannot fill
 /// memory. Replies are separately shortened to Telegram's own limit when sent
@@ -56,14 +87,24 @@ pub async fn handle(
         chat_id,
         chat_is_private,
         user_id,
+        message_id,
         message_content,
         user_full_name,
+        record,
         reply_to_content,
         reply_to_from,
         ..
     }: Context,
 ) -> BotResult<()> {
     let mut cn = pool.get()?;
+
+    // The replied message as the history has it now, edits included; what
+    // Telegram sent along is for messages older than the history.
+    let reply_id = record.reply_to_id;
+    let stored_reply = reply_id
+        .and_then(|id| model::Message::get(&mut cn, chat_id, id).ok().flatten())
+        .map(|(m, _, _)| m.content);
+    let reply = stored_reply.or(reply_to_content).unwrap_or_default();
 
     let (source, config) = match load_main(&mut cn, connected_chat_id, user_id) {
         Ok(found) => found,
@@ -96,11 +137,17 @@ pub async fn handle(
         })
     };
 
+    // Ids name messages of the chat the message came from. Running another
+    // chat's files with `/connect`, `history` lists that chat, where these ids
+    // mean nothing.
+    let here = chat_id == connected_chat_id;
     let ctx = ScriptContext {
         message: message_content,
         sender: user_full_name,
-        reply: reply_to_content.unwrap_or_default(),
+        reply,
         reply_from: reply_to_from.unwrap_or_default(),
+        message_id: here.then_some(message_id.0 as i64),
+        reply_id: reply_id.filter(|_| here),
     };
     // Messages go to the chat the message came from, even when the script runs
     // against another chat's files via `/connect`.
@@ -123,22 +170,28 @@ pub async fn handle(
 
     typer.abort();
 
-    let (text, later) = match result {
-        Ok(Run { output: Ok(output), later }) => (raw(output), later),
-        Ok(Run { output: Err(err), later }) => {
+    let (text, later, tag) = match result {
+        Ok(Run { output: Ok(output), later, tag }) => (raw(output), later, tag),
+        Ok(Run { output: Err(err), later, .. }) => {
             let text = match group_tip(&pool, chat_id, chat_is_private, connected_chat_id) {
                 Some(tip) => error_with_tip(err, tip),
                 None => error(None, err),
             };
-            (text, later)
+            // An error report is the bot's, whatever the script meant to say.
+            (text, later, None)
         }
         Err(err) => {
             error!("Script task failed: {err}");
-            (error(None, "The bot failed to run the script."), Vec::new())
+            (error(None, "The bot failed to run the script."), Vec::new(), None)
         }
     };
 
-    let sent = send_reply(&bot, &pool, chat_id, text).await;
+    let origin = model::Origin {
+        trigger: Some(message_id),
+        tag,
+        ..Default::default()
+    };
+    let sent = send_reply(&bot, &pool, chat_id, text, origin).await;
     // Only now, with the reply out and recorded, so the scripts see it in
     // `history`. Queued even when the script failed after calling `later`: the
     // upkeep it asked for is usually independent of whatever went wrong.
@@ -217,7 +270,13 @@ fn group_tip(pool: &PgPool, chat_id: ChatId, private: bool, target: ChatId) -> O
 }
 
 /// Sends a script's output, if there is any, and records it in the history.
-async fn send_reply(bot: &Bot, pool: &PgPool, chat_id: ChatId, text: Formatted) -> BotResult<()> {
+async fn send_reply(
+    bot: &Bot,
+    pool: &PgPool,
+    chat_id: ChatId,
+    text: Formatted,
+    origin: model::Origin,
+) -> BotResult<()> {
     if text.is_empty() {
         return Ok(());
     }
@@ -227,13 +286,9 @@ async fn send_reply(bot: &Bot, pool: &PgPool, chat_id: ChatId, text: Formatted) 
             info!("Sent message successfully");
             // Bot messages are recorded with a null user, so `history` can show them.
             let mut cn = pool.get()?;
-            model::Message::insert(
-                &mut cn,
-                msg.id,
-                chat_id,
-                None,
-                msg.text().unwrap_or_default(),
-            )?;
+            let record = record::describe(&msg)
+                .unwrap_or_else(|| record::Record::text(msg.text().unwrap_or_default()));
+            model::Message::insert(&mut cn, msg.id, chat_id, &record, &origin)?;
         }
         Err(err) => {
             error!("Failed to send message: {err}");
@@ -288,6 +343,7 @@ pub fn run_later(
                 let hooks = Hooks {
                     later: None,
                     courier: Some(courier.clone()),
+                    tag: None,
                 };
                 match run_script(pool.clone(), chat_id, user_id, &source, &config, &ctx, hooks) {
                     Ok(_) => info!("Deferred script {path} finished"),
@@ -308,6 +364,8 @@ pub struct Run {
     pub output: Result<String, String>,
     /// Scripts the run queued with `later`, for [`run_later`].
     pub later: Vec<String>,
+    /// What the script tagged its reply as, with `bot.tag`.
+    pub tag: Option<String>,
 }
 
 /// Runs `source` the way a message runs `main.dog`: able to send through
@@ -324,24 +382,32 @@ pub fn run_message(
     courier: Arc<dyn Courier>,
 ) -> Run {
     let later = runtime::Later::default();
+    let tag = runtime::Tag::default();
     let hooks = Hooks {
         later: Some(later.clone()),
         courier: Some(courier),
+        tag: Some(tag.clone()),
     };
     let output = run_script(pool, chat_id, user_id, source, config, ctx, hooks);
     Run {
         output,
         later: later.take(),
+        tag: tag.take(),
     }
 }
 
-/// The four context values a script sees as globals.
-#[derive(Clone)]
+/// The context values a script sees as globals.
+#[derive(Clone, Default)]
 pub struct ScriptContext {
     pub message: String,
     pub sender: String,
     pub reply: String,
     pub reply_from: String,
+    /// The message being handled, as `history` and `bot.message` know it.
+    /// `None` where there is no such message (the console, `/connect`).
+    pub message_id: Option<i64>,
+    /// The message it replies to.
+    pub reply_id: Option<i64>,
 }
 
 /// What a run can reach beyond its own computation.
@@ -352,6 +418,10 @@ pub struct Hooks {
     pub later: Option<runtime::Later>,
     /// Delivers `bot.send` and `bot.edit`; `None` makes them raise.
     pub courier: Option<Arc<dyn courier::Courier>>,
+    /// Where `bot.tag` leaves the run's tag. `None` gives the run one of its
+    /// own that nobody reads, which is what a deferred run gets: its reply is
+    /// discarded, and its `send`s carry the tag themselves.
+    pub tag: Option<runtime::Tag>,
 }
 
 /// Compiles and runs one script, returning what to reply with.
@@ -378,7 +448,11 @@ fn run_script(
         later: hooks.later,
         courier: hooks.courier,
         budget: Rc::new(Cell::new(runtime::MAX_MESSAGES)),
+        tag: hooks.tag.unwrap_or_default(),
+        trigger: ctx.message_id,
+        download_limit: config.download_limit.min(TELEGRAM_DOWNLOAD_LIMIT),
     };
+    let id = |id: Option<i64>| id.map(Value::Int).unwrap_or(Value::Null);
 
     let mut rt = Builder::sandboxed()
         .limits(Limits {
@@ -394,6 +468,8 @@ fn run_script(
         .global("sender", Value::str(&ctx.sender))
         .global("reply", Value::str(&ctx.reply))
         .global("reply_from", Value::str(&ctx.reply_from))
+        .global("message_id", id(ctx.message_id))
+        .global("reply_id", id(ctx.reply_id))
         .build();
 
     // `print`/`println` go to the buffer; the script's folded value is its
